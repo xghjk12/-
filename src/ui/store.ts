@@ -11,7 +11,7 @@
  * 它们不是可序列化状态，重建它们等于把正在放的歌打断。
  */
 import { create } from 'zustand';
-import { isValidMode, nextMode } from '../core/queue.js';
+import { isValidMode, nextMode, removeQueueItem } from '../core/queue.js';
 import type { PlayMode } from '../core/queue.js';
 import { filterTracks, sortTracks } from '../core/sort.js';
 import type { SortDirection, Track, TrackSortKey } from '../core/track.js';
@@ -57,6 +57,14 @@ export interface ScanStatus {
   reused: number;
   failed: number;
   currentPath?: string;
+  /** 目录遍历（含每个文件取 size/mtime）耗时：大库时这段往往比解析还长。 */
+  listingMs: number;
+  /** 本轮扫描总耗时。 */
+  elapsedMs: number;
+  /** 实际读取的字节数——「只读文件头」收益的直接证据。 */
+  bytesRead: number;
+  /** 清理掉的、已经不在磁盘上的文件数。 */
+  removed: number;
 }
 
 const IDLE_SCAN: ScanStatus = {
@@ -67,6 +75,10 @@ const IDLE_SCAN: ScanStatus = {
   parsed: 0,
   reused: 0,
   failed: 0,
+  listingMs: 0,
+  elapsedMs: 0,
+  bytesRead: 0,
+  removed: 0,
 };
 
 export const MODE_TEXT: Record<PlayMode, string> = {
@@ -391,13 +403,20 @@ export const useAppStore = create<AppStore>()((set, get) => {
     );
   }
 
-  async function runScan(source: BrowserMusicSource, handle?: DirectoryHandleLike): Promise<void> {
+  async function runScan(
+    source: BrowserMusicSource,
+    handle?: DirectoryHandleLike,
+    listingMs = 0,
+  ): Promise<void> {
     if (!services) return;
     scanAbort = new AbortController();
     currentSource = source;
     if (handle) await services.storage.saveHandle(MUSIC_SOURCE_ID, handle);
 
-    set({ scan: { ...IDLE_SCAN, active: true, phase: 'listing' }, rootName: source.rootName });
+    set({
+      scan: { ...IDLE_SCAN, active: true, phase: 'listing', listingMs },
+      rootName: source.rootName,
+    });
 
     const result = await scanLibrary({
       storage: services.storage,
@@ -407,6 +426,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         const settled = progress.phase === 'done' || progress.phase === 'aborted';
         set({
           scan: {
+            // 沿用本轮已有的统计（listingMs 等），只更新进度字段
+            ...get().scan,
             active: !settled,
             phase: progress.phase,
             found: progress.found,
@@ -435,6 +456,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
         parsed: stats.parsed,
         reused: stats.reused,
         failed: stats.failed,
+        listingMs,
+        elapsedMs: stats.elapsedMs,
+        bytesRead: stats.bytesRead,
+        removed: stats.removed,
       },
     });
 
@@ -449,19 +474,33 @@ export const useAppStore = create<AppStore>()((set, get) => {
       pushNotice(
         `曲库就绪：${stats.total} 首（缓存命中 ${stats.reused}、新解析 ${stats.parsed}` +
           `${stats.removed ? `、清理 ${stats.removed}` : ''}），读取 ${megabytes}MB，` +
-          `耗时 ${(stats.elapsedMs / 1000).toFixed(1)}s`,
+          `遍历 ${(listingMs / 1000).toFixed(1)}s + 扫描 ${(stats.elapsedMs / 1000).toFixed(1)}s`,
       );
     }
 
     await restorePlayback();
   }
 
+  /** 遍历目录并计时：这段（每个文件取一次 size/mtime）在大库上可能比解析还长。 */
   async function collect(
     handle: DirectoryHandleLike,
-  ): Promise<BrowserMusicSource> {
-    return collectFromDirectoryHandle(handle, (found) =>
+  ): Promise<{ source: BrowserMusicSource; listingMs: number }> {
+    const startedAt = Date.now();
+    const source = await collectFromDirectoryHandle(handle, (found) =>
       set({ scan: { ...IDLE_SCAN, active: true, phase: 'listing', found } }),
     );
+    return { source, listingMs: Date.now() - startedAt };
+  }
+
+  /** 目录失效要给出可执行的下一步，而不是把 DOMException 的名字丢给用户。 */
+  function sourceErrorMessage(error: unknown): string {
+    if (error instanceof DOMException) {
+      if (error.name === 'NotFoundError')
+        return '目录已移动或被删除，请重新选择音乐文件夹（已缓存的曲库仍保留）';
+      if (error.name === 'NotAllowedError') return '没有拿到目录读取权限，请重新选择音乐文件夹';
+      if (error.name === 'AbortError') return '已取消选择文件夹';
+    }
+    return error instanceof Error ? error.message : String(error);
   }
 
   return {
@@ -496,9 +535,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
           canRestore: Boolean(handle),
         });
 
-        // 页面隐藏时补一次进度（技术方案 8.4）
+        // 页面隐藏、以及即将卸载时各补写一次进度（技术方案 8.4）。
+        // 用 pagehide 而不是 beforeunload：它在 bfcache 与移动端切后台时都会触发。
         document.addEventListener('visibilitychange', () => {
           if (document.hidden) void services?.writer.flush();
+        });
+        window.addEventListener('pagehide', () => {
+          void services?.writer.flush();
         });
 
         bindMediaSessionHandlers({
@@ -525,14 +568,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
       try {
         const handle = await picker({ mode: 'read' });
         set({ scan: { ...IDLE_SCAN, active: true, phase: 'listing' } });
-        await runScan(await collect(handle), handle);
+        const collected = await collect(handle);
+        await runScan(collected.source, handle, collected.listingMs);
       } catch (error) {
         set({ scan: IDLE_SCAN });
-        if (error instanceof DOMException && error.name === 'AbortError') {
-          pushNotice('已取消选择文件夹');
-          return;
-        }
-        pushNotice(`目录选择失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+        pushNotice(sourceErrorMessage(error), error instanceof DOMException && error.name === 'AbortError' ? 'info' : 'error');
       }
     },
 
@@ -552,10 +592,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           return;
         }
         set({ scan: { ...IDLE_SCAN, active: true, phase: 'listing' } });
-        await runScan(await collect(handle), handle);
+        const collected = await collect(handle);
+        await runScan(collected.source, handle, collected.listingMs);
       } catch (error) {
         set({ scan: IDLE_SCAN });
-        pushNotice(`恢复曲库失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+        pushNotice(sourceErrorMessage(error), 'error');
       }
     },
 
@@ -664,18 +705,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
     removeFromQueue(index) {
       const { queue, currentIndex } = get();
       if (index < 0 || index >= queue.length) return;
-      const nextQueue = queue.filter((_, position) => position !== index);
 
-      if (index === currentIndex) {
+      const result = removeQueueItem(queue, currentIndex, index);
+      if (result.removedCurrent) {
         // 移除当前曲目：停止播放，等用户重新点播（与 Demo 行为一致）
         engine?.pause();
-        set({ queue: nextQueue, currentIndex: -1 });
-        return;
       }
-      set({
-        queue: nextQueue,
-        currentIndex: index < currentIndex ? currentIndex - 1 : currentIndex,
-      });
+      set({ queue: result.queue, currentIndex: result.currentIndex });
     },
 
     clearQueue() {

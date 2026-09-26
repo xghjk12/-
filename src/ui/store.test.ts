@@ -1,0 +1,340 @@
+/**
+ * store 的单测（jsdom）。
+ *
+ * `src/ui/store.ts` 是最大的编排文件，之前只被界面冒烟间接覆盖。这里把能在 Node 里
+ * 确定性验证的部分补上：视图/检索/排序的组合、曲库统计、队列下标修正、音量与静音的联动、
+ * 播放模式循环、提示的进出，以及"IndexedDB 不可用时降级为内存存储"这条启动路径。
+ *
+ * 需要 jsdom 是因为 store 会写 `document.title`、挂 `visibilitychange` / `pagehide`；
+ * jsdom 没有 IndexedDB，所以 `getServices()` 会走 `memoryStorage()` 降级——
+ * 这本身就是产品在隐私模式下的真实行为，值得锁住。
+ *
+ * @vitest-environment jsdom
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Track } from '../core/track.js';
+import { resetServices } from './services.js';
+import { getAudioElement, libraryStats, readLiveProgress, useAppStore, visibleTracks } from './store.js';
+import type { LibraryView } from './store.js';
+
+function track(path: string, overrides: Partial<Track> = {}): Track {
+  return {
+    path,
+    name: path.split('/').pop() ?? path,
+    size: 1024,
+    lastModified: 1,
+    cacheKey: `${path}\u00001024\u00001`,
+    title: path,
+    titleFromFileName: false,
+    durationSec: 200,
+    extension: 'mp3',
+    verdict: 'decodable',
+    hasCover: false,
+    addedAt: 1000,
+    ...overrides,
+  };
+}
+
+const FILTERS = { query: '', sortKey: 'default' as const, sortDirection: 'asc' as const };
+
+beforeEach(() => {
+  resetServices();
+  useAppStore.setState({
+    ready: false,
+    tracks: [],
+    query: '',
+    sortKey: 'default',
+    sortDirection: 'asc',
+    view: 'all',
+    selectedPath: undefined,
+    queue: [],
+    currentIndex: -1,
+    mode: 'sequence',
+    playing: false,
+    volume: 0.8,
+    muted: false,
+    queueOpen: false,
+    notices: [],
+  });
+});
+
+describe('visibleTracks：视图 / 检索 / 排序', () => {
+  const tracks = [
+    track('a', { title: '青花瓷', artist: '周杰伦', album: '我很忙', durationSec: 200, addedAt: 300 }),
+    track('b', { title: 'Duvet', artist: 'bôa', album: 'Twilight', durationSec: 203, addedAt: 100 }),
+    track('c', { title: '第10首', artist: '周杰伦', album: '我很忙', durationSec: 100, addedAt: 200 }),
+    track('d', { title: '水压', verdict: 'metadata-only', addedAt: 400 }),
+  ];
+
+  it('all 视图返回全部，且 sortKey=default 时保留原顺序', () => {
+    const result = visibleTracks(tracks, { ...FILTERS, view: 'all' });
+    expect(result.map((item) => item.path)).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('unsupported 视图只留不可播放的曲目', () => {
+    const result = visibleTracks(tracks, { ...FILTERS, view: 'unsupported' });
+    expect(result.map((item) => item.path)).toEqual(['d']);
+  });
+
+  it('recent 视图按入库时间倒序，且 sortKey=default 时不再被标题重排', () => {
+    const result = visibleTracks(tracks, { ...FILTERS, view: 'recent' });
+    expect(result.map((item) => item.path)).toEqual(['d', 'a', 'c', 'b']);
+  });
+
+  it('检索命中标题 / 艺术家 / 专辑，且忽略大小写与拉丁变音符号', () => {
+    const byTitle = visibleTracks(tracks, { ...FILTERS, view: 'all', query: '青花' });
+    expect(byTitle.map((item) => item.path)).toEqual(['a']);
+
+    // 'bôa' 用普通字母 boa 也要搜得到（工作区里就有 bôa - Duvet.flac）
+    const byArtist = visibleTracks(tracks, { ...FILTERS, view: 'all', query: 'BOA' });
+    expect(byArtist.map((item) => item.path)).toEqual(['b']);
+
+    const withDiacritics = visibleTracks(tracks, { ...FILTERS, view: 'all', query: 'bôa' });
+    expect(withDiacritics.map((item) => item.path)).toEqual(['b']);
+
+    const byAlbum = visibleTracks(tracks, { ...FILTERS, view: 'all', query: '我很忙' });
+    expect(byAlbum.map((item) => item.path)).toEqual(['a', 'c']);
+  });
+
+  it('检索与视图叠加生效', () => {
+    const result = visibleTracks(tracks, { ...FILTERS, view: 'unsupported', query: '周杰伦' });
+    expect(result).toEqual([]);
+  });
+
+  it('按标题升序用中文 collator（第10首 排在 第2首 之后）', () => {
+    const list = [
+      track('x', { title: '第10首' }),
+      track('y', { title: '第2首' }),
+      track('z', { title: '第1首' }),
+    ];
+    const asc = visibleTracks(list, { ...FILTERS, view: 'all', sortKey: 'title' });
+    expect(asc.map((item) => item.title)).toEqual(['第1首', '第2首', '第10首']);
+
+    const desc = visibleTracks(list, { ...FILTERS, view: 'all', sortKey: 'title', sortDirection: 'desc' });
+    expect(desc.map((item) => item.title)).toEqual(['第10首', '第2首', '第1首']);
+  });
+
+  it('按时长排序走数值比较', () => {
+    const result = visibleTracks(tracks, { ...FILTERS, view: 'all', sortKey: 'duration' });
+    // d 没有覆盖 durationSec，用的是工厂默认值 200
+    expect(result.map((item) => item.durationSec)).toEqual([100, 200, 200, 203]);
+  });
+});
+
+describe('libraryStats', () => {
+  it('统计总数、总时长、艺术家与专辑数、不支持数', () => {
+    const stats = libraryStats([
+      track('a', { artist: '周杰伦', album: '我很忙', durationSec: 200 }),
+      track('b', { artist: '周杰伦', album: '我很忙', durationSec: 100 }),
+      track('c', { artist: 'bôa', album: 'Twilight', durationSec: 50 }),
+      // 缺时长、缺艺术家与专辑：不计入艺术家/专辑数，时长按 0 计
+      track('d', { verdict: 'metadata-only', durationSec: undefined }),
+    ]);
+
+    expect(stats).toEqual({
+      total: 4,
+      durationSec: 350,
+      artists: 2,
+      albums: 2,
+      unsupported: 1,
+    });
+  });
+
+  it('空曲库与缺字段都不炸', () => {
+    expect(libraryStats([])).toEqual({
+      total: 0,
+      durationSec: 0,
+      artists: 0,
+      albums: 0,
+      unsupported: 0,
+    });
+
+    const stats = libraryStats([track('a', { artist: undefined, album: undefined, durationSec: undefined })]);
+    expect(stats).toMatchObject({ total: 1, durationSec: 0, artists: 0, albums: 0 });
+  });
+});
+
+describe('store：视图与检索动作', () => {
+  it('setSort 同键再次点击切换升降序，换键时重置为升序', () => {
+    const { setSort } = useAppStore.getState();
+
+    setSort('title');
+    expect(useAppStore.getState()).toMatchObject({ sortKey: 'title', sortDirection: 'asc' });
+
+    setSort('title');
+    expect(useAppStore.getState().sortDirection).toBe('desc');
+
+    setSort('artist');
+    expect(useAppStore.getState()).toMatchObject({ sortKey: 'artist', sortDirection: 'asc' });
+  });
+
+  it('setSort("default") 不会把方向翻转成 desc', () => {
+    useAppStore.getState().setSort('title');
+    useAppStore.getState().setSort('title');
+    useAppStore.getState().setSort('default');
+    expect(useAppStore.getState()).toMatchObject({ sortKey: 'default', sortDirection: 'asc' });
+  });
+
+  it('setQuery / setView / select 直接落到状态上', () => {
+    const store = useAppStore.getState();
+    store.setQuery('青花');
+    store.setView('unsupported' as LibraryView);
+    store.select('专辑/a.flac');
+
+    expect(useAppStore.getState()).toMatchObject({
+      query: '青花',
+      view: 'unsupported',
+      selectedPath: '专辑/a.flac',
+    });
+  });
+});
+
+describe('store：音量与静音', () => {
+  it('音量被夹在 0..1，拖到 0 会自动静音', () => {
+    const { setVolume } = useAppStore.getState();
+
+    setVolume(2);
+    expect(useAppStore.getState().volume).toBe(1);
+    expect(useAppStore.getState().muted).toBe(false);
+
+    setVolume(0);
+    expect(useAppStore.getState().volume).toBe(0);
+    expect(useAppStore.getState().muted).toBe(true);
+
+    setVolume(0.4);
+    expect(useAppStore.getState()).toMatchObject({ volume: 0.4, muted: false });
+  });
+
+  it('toggleMute 只翻转静音，不动音量', () => {
+    useAppStore.getState().setVolume(0.6);
+    useAppStore.getState().toggleMute();
+    expect(useAppStore.getState()).toMatchObject({ muted: true, volume: 0.6 });
+
+    useAppStore.getState().toggleMute();
+    expect(useAppStore.getState().muted).toBe(false);
+  });
+});
+
+describe('store：播放模式', () => {
+  it('cycleMode 依次循环四种模式并回到起点', () => {
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      useAppStore.getState().cycleMode();
+      seen.push(useAppStore.getState().mode);
+    }
+    expect(seen).toEqual(['repeat-all', 'repeat-one', 'shuffle', 'sequence']);
+  });
+
+  it('toggleQueue 开关队列抽屉', () => {
+    useAppStore.getState().toggleQueue();
+    expect(useAppStore.getState().queueOpen).toBe(true);
+    useAppStore.getState().toggleQueue();
+    expect(useAppStore.getState().queueOpen).toBe(false);
+  });
+});
+
+describe('store：队列增删', () => {
+  const QUEUE = ['a', 'b', 'c'];
+
+  it('移除当前曲目 → 下标置 -1 并停止播放', () => {
+    useAppStore.setState({ queue: QUEUE, currentIndex: 1 });
+    useAppStore.getState().removeFromQueue(1);
+
+    expect(useAppStore.getState()).toMatchObject({ queue: ['a', 'c'], currentIndex: -1 });
+  });
+
+  it('移除当前曲目之前的项 → 下标减 1，仍然指向同一首歌', () => {
+    useAppStore.setState({ queue: QUEUE, currentIndex: 2 });
+    useAppStore.getState().removeFromQueue(0);
+
+    const state = useAppStore.getState();
+    expect(state.queue).toEqual(['b', 'c']);
+    expect(state.queue[state.currentIndex]).toBe('c');
+  });
+
+  it('移除当前曲目之后的项 → 下标不变', () => {
+    useAppStore.setState({ queue: QUEUE, currentIndex: 0 });
+    useAppStore.getState().removeFromQueue(2);
+
+    expect(useAppStore.getState()).toMatchObject({ queue: ['a', 'b'], currentIndex: 0 });
+  });
+
+  it('越界下标不做任何改动', () => {
+    useAppStore.setState({ queue: QUEUE, currentIndex: 1 });
+    useAppStore.getState().removeFromQueue(9);
+    useAppStore.getState().removeFromQueue(-1);
+
+    expect(useAppStore.getState()).toMatchObject({ queue: QUEUE, currentIndex: 1 });
+  });
+
+  it('clearQueue 清空队列、复位下标并更新窗口标题', () => {
+    useAppStore.setState({ queue: QUEUE, currentIndex: 1, resumePath: 'b' });
+    document.title = '某首歌 - 轻音播放';
+
+    useAppStore.getState().clearQueue();
+
+    expect(useAppStore.getState()).toMatchObject({ queue: [], currentIndex: -1, shuffleOrder: [] });
+    expect(useAppStore.getState().resumePath).toBeUndefined();
+    expect(document.title).toBe('轻音播放');
+  });
+});
+
+describe('store：提示', () => {
+  it('pushNotice 追加并用自增 id 区分，dismissNotice 能移除', () => {
+    const { pushNotice } = useAppStore.getState();
+    pushNotice('第一条');
+    pushNotice('第二条', 'warn');
+
+    const notices = useAppStore.getState().notices;
+    expect(notices.map((notice) => notice.message)).toEqual(['第一条', '第二条']);
+    expect(notices[1]?.kind).toBe('warn');
+    expect(notices[0]?.id).not.toBe(notices[1]?.id);
+
+    useAppStore.getState().dismissNotice(notices[0]!.id);
+    expect(useAppStore.getState().notices.map((notice) => notice.message)).toEqual(['第二条']);
+  });
+
+  it('提示会自己过期消失', () => {
+    vi.useFakeTimers();
+    try {
+      useAppStore.getState().pushNotice('很快就走');
+      expect(useAppStore.getState().notices).toHaveLength(1);
+
+      vi.advanceTimersByTime(4000);
+      expect(useAppStore.getState().notices).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('store：启动（IndexedDB 不可用时降级）', () => {
+  it('boot 后进入就绪态；jsdom 没有 IndexedDB，于是降级为内存存储', async () => {
+    await useAppStore.getState().boot();
+
+    const state = useAppStore.getState();
+    expect(state.ready).toBe(true);
+    expect(state.persistent).toBe(false);
+    // 空存储 → 用默认值
+    expect(state).toMatchObject({ tracks: [], volume: 0.8, muted: false, mode: 'sequence' });
+    expect(state.canRestore).toBe(false);
+  });
+
+  it('boot 之后播放引擎可用，进度读取有确定结果', async () => {
+    await useAppStore.getState().boot();
+
+    expect(getAudioElement()).toBeDefined();
+    expect(readLiveProgress()).toEqual({ positionSec: 0, durationSec: 0 });
+  });
+
+  it('重复调用 boot 不会重复初始化', async () => {
+    const first = useAppStore.getState().boot();
+    const second = useAppStore.getState().boot();
+    await Promise.all([first, second]);
+
+    const element = getAudioElement();
+    await useAppStore.getState().boot();
+    // 引擎没有被重建
+    expect(getAudioElement()).toBe(element);
+  });
+});

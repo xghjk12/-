@@ -190,3 +190,44 @@ export function findPlayableIndex(
   }
   return -1;
 }
+
+export interface QueueRemoval<T> {
+  queue: T[];
+  currentIndex: number;
+  /** 被移除的正是当前曲目：调用方应当停止播放。 */
+  removedCurrent: boolean;
+}
+
+/**
+ * 从队列里移除一项并修正当前下标。
+ *
+ * 这是队列里最容易写错的一处，三种情况必须分开处理：
+ *  - 移除的**就是当前曲目** → 下标置 -1（停止播放等用户重新点播），而不是悄悄往下播
+ *  - 移除的**在当前曲目之前** → 当前下标必须减 1，否则会跳到别的曲目上
+ *  - 移除的**在当前曲目之后** → 下标不变
+ *
+ * 抽成 core 的纯函数是为了能穷举测：`ui/store.ts` 里原来这段逻辑没有任何单测。
+ */
+export function removeQueueItem<T>(
+  queue: readonly T[],
+  currentIndex: number,
+  removeIndex: number,
+): QueueRemoval<T> {
+  if (removeIndex < 0 || removeIndex >= queue.length) {
+    return { queue: [...queue], currentIndex, removedCurrent: false };
+  }
+
+  const next = queue.filter((_, index) => index !== removeIndex);
+
+  if (currentIndex < 0) {
+    return { queue: next, currentIndex, removedCurrent: false };
+  }
+  if (removeIndex === currentIndex) {
+    return { queue: next, currentIndex: -1, removedCurrent: true };
+  }
+  return {
+    queue: next,
+    currentIndex: removeIndex < currentIndex ? currentIndex - 1 : currentIndex,
+    removedCurrent: false,
+  };
+}

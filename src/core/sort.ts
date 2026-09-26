@@ -58,17 +58,34 @@ function fieldOf(track: SortableTrack, key: Exclude<TrackSortKey, 'default' | 'd
 }
 
 /**
- * 子串匹配标题 / 艺术家 / 专辑，大小写不敏感，查询串两端空白忽略。
+ * 检索用的规范化：去掉变音符号 + 转小写。
+ *
+ * 曲库里 `bôa - Duvet`、`Café` 这类带变音符号的标签很常见，而用户敲的是普通字母，
+ * 只做 `toLowerCase()` + 子串匹配会让「搜 boa 找不到 bôa」（这是实测踩到的：
+ * 工作区里就有一首 `bôa - Duvet.flac`）。做法是 NFD 分解后去掉组合记号，
+ * 比引入拼音库便宜得多，且不依赖任何平台 API。
+ *
+ * 注意这只解决拉丁字母的变音符号；中文的拼音/首字母检索是另一件事。
+ */
+export function normalizeForSearch(value: unknown): string {
+  return toText(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+/**
+ * 子串匹配标题 / 艺术家 / 专辑，忽略大小写与拉丁变音符号，查询串两端空白忽略。
  * 空查询返回全部（依然是新数组）。
  */
 export function filterTracks<T extends SortableTrack>(tracks: readonly T[], query: string): T[] {
-  const needle = toText(query).trim().toLowerCase();
+  const needle = normalizeForSearch(query).trim();
   if (!needle) return tracks.slice();
   return tracks.filter((track) => {
     return (
-      toText(track.title).toLowerCase().includes(needle) ||
-      toText(track.artist).toLowerCase().includes(needle) ||
-      toText(track.album).toLowerCase().includes(needle)
+      normalizeForSearch(track.title).includes(needle) ||
+      normalizeForSearch(track.artist).includes(needle) ||
+      normalizeForSearch(track.album).includes(needle)
     );
   });
 }

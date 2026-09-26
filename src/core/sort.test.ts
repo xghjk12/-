@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareText, filterTracks, groupBy, sortTracks } from './sort.js';
+import { compareText, filterTracks, groupBy, normalizeForSearch, sortTracks } from './sort.js';
 import type { SortableTrack } from './sort.js';
 
 /** 与 Demo 用例同形的小样本，便于逐条对照断言。 */
@@ -216,5 +216,38 @@ describe('groupBy', () => {
     const groups = groupBy(tracks, 'album');
     expect(groups.flatMap((g) => g.tracks)).toHaveLength(3);
     expect(tracks).toHaveLength(3);
+  });
+});
+
+describe('normalizeForSearch 与带变音符号的检索', () => {
+  it('去掉拉丁变音符号并转小写', () => {
+    expect(normalizeForSearch('bôa')).toBe('boa');
+    expect(normalizeForSearch('Café')).toBe('cafe');
+    expect(normalizeForSearch('Björk')).toBe('bjork');
+    expect(normalizeForSearch('Über')).toBe('uber');
+    // 中文不受影响
+    expect(normalizeForSearch('青花瓷')).toBe('青花瓷');
+    // 非字符串输入按空串处理，不抛异常
+    expect(normalizeForSearch(undefined)).toBe('');
+    expect(normalizeForSearch(42)).toBe('42');
+  });
+
+  it('用普通字母能搜到带变音符号的标签（实测踩过：bôa - Duvet）', () => {
+    const tracks: SortableTrack[] = [
+      { title: 'Duvet', artist: 'bôa', album: 'Twilight' },
+      { title: '青花瓷', artist: '周杰伦', album: '我很忙' },
+    ];
+
+    expect(filterTracks(tracks, 'boa').map((t) => t.title)).toEqual(['Duvet']);
+    expect(filterTracks(tracks, 'DUVET').map((t) => t.title)).toEqual(['Duvet']);
+    expect(filterTracks(tracks, 'bôa').map((t) => t.title)).toEqual(['Duvet']);
+    // 查询串带变音符号、标签是普通字母时同样命中
+    expect(filterTracks([{ title: 'Bjork' }], 'björk').map((t) => t.title)).toEqual(['Bjork']);
+  });
+
+  it('规范化只影响匹配，不改变返回的原始数据', () => {
+    const tracks: SortableTrack[] = [{ title: 'Duvet', artist: 'bôa' }];
+    const result = filterTracks(tracks, 'boa');
+    expect(result[0]?.artist).toBe('bôa');
   });
 });

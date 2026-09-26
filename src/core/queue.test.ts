@@ -6,6 +6,7 @@ import {
   MODE_LABEL,
   MODES,
   nextMode,
+  removeQueueItem,
   resolveNextIndex,
   resolvePrevIndex,
   shuffleOrder,
@@ -281,5 +282,65 @@ describe('findPlayableIndex', () => {
     expect(calls).toBe(1);
     expect(findPlayableIndex(4, -1, playable([2]))).toBe(2);
     expect(findPlayableIndex(4, 8, playable([0]))).toBe(0);
+  });
+});
+
+describe('removeQueueItem：移除队列项时的下标修正', () => {
+  const QUEUE = ['a', 'b', 'c', 'd'];
+
+  it('移除的是当前曲目 → 下标置 -1，并告诉调用方要停止播放', () => {
+    const result = removeQueueItem(QUEUE, 2, 2);
+
+    expect(result.queue).toEqual(['a', 'b', 'd']);
+    expect(result.currentIndex).toBe(-1);
+    expect(result.removedCurrent).toBe(true);
+  });
+
+  it('移除当前曲目之前的项 → 下标减 1（否则会跳到别的曲目上）', () => {
+    const result = removeQueueItem(QUEUE, 2, 0);
+
+    expect(result.queue).toEqual(['b', 'c', 'd']);
+    expect(result.currentIndex).toBe(1);
+    expect(result.removedCurrent).toBe(false);
+    // 修正后的下标仍然指向原来那首歌
+    expect(result.queue[result.currentIndex]).toBe('c');
+  });
+
+  it('移除当前曲目之后的项 → 下标不变', () => {
+    const result = removeQueueItem(QUEUE, 1, 3);
+
+    expect(result.queue).toEqual(['a', 'b', 'c']);
+    expect(result.currentIndex).toBe(1);
+    expect(result.queue[result.currentIndex]).toBe('b');
+  });
+
+  it('没有当前曲目（-1）时只删项，不改下标', () => {
+    const result = removeQueueItem(QUEUE, -1, 1);
+
+    expect(result.queue).toEqual(['a', 'c', 'd']);
+    expect(result.currentIndex).toBe(-1);
+    expect(result.removedCurrent).toBe(false);
+  });
+
+  it('下标越界时原样返回，不改动原数组', () => {
+    for (const removeIndex of [-1, 4, 99]) {
+      const result = removeQueueItem(QUEUE, 1, removeIndex);
+      expect(result.queue, String(removeIndex)).toEqual(QUEUE);
+      expect(result.currentIndex).toBe(1);
+    }
+    // 入参不能被就地修改
+    const original = [...QUEUE];
+    removeQueueItem(QUEUE, 0, 0);
+    expect(QUEUE).toEqual(original);
+  });
+
+  it('删到只剩一项、以及删空都能正确收尾', () => {
+    const single = removeQueueItem(['a'], 0, 0);
+    expect(single.queue).toEqual([]);
+    expect(single.currentIndex).toBe(-1);
+
+    const empty = removeQueueItem([], 0, 0);
+    expect(empty.queue).toEqual([]);
+    expect(empty.removedCurrent).toBe(false);
   });
 });

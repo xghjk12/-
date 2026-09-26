@@ -146,17 +146,28 @@ export async function collectFromDirectoryHandle(
   return sourceFromFiles(handle.name, files);
 }
 
-/** 回退路：`<input webkitdirectory>` 给出的 FileList，用 webkitRelativePath 作为相对路径。 */
+/**
+ * 回退路：`<input webkitdirectory>` 给出的 FileList。
+ *
+ * `webkitRelativePath` 形如 `音乐/专辑/a.flac`，比句柄模式**多一层用户选中的根目录名**。
+ * 这里把它剥掉，让两条入口对同一个文件算出同一个相对路径——否则换个入口就会因为缓存键
+ * 不同而全量重扫，用户会以为"曲库丢了"。
+ */
 export function sourceFromFileList(fileList: FileList): BrowserMusicSource {
   const files = new Map<string, File>();
+  let rootName = '';
+
   for (const file of Array.from(fileList)) {
-    const relativePath = joinRelativePath(
-      (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
-    );
-    if (isAudioFileName(relativePath)) files.set(relativePath, file);
+    const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+    const segments = relative ? relative.split('/') : [file.name];
+    if (segments.length > 1 && !rootName) rootName = segments[0]!;
+
+    // 去掉根目录段；没有 webkitRelativePath 时退回文件名
+    const path = joinRelativePath(segments.slice(1).join('/')) || joinRelativePath(file.name);
+    if (isAudioFileName(path)) files.set(path, file);
   }
-  const rootName = [...files.keys()][0]?.split('/')[0] ?? '已选择的文件夹';
-  return sourceFromFiles(rootName, files);
+
+  return sourceFromFiles(rootName || '已选择的文件夹', files);
 }
 
 export interface PickedDirectory {
