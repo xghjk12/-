@@ -187,6 +187,12 @@ export function lyricsToText(lyrics: Lyrics): string {
     .join('\n');
 }
 
+/** 是否是歌词文件（`.lrc`，大小写不敏感）。 */
+export function isLyricFileName(fileName: string): boolean {
+  const base = fileName.replace(/\\/g, '/').split('/').pop() ?? '';
+  return base.toLowerCase().endsWith('.lrc');
+}
+
 /* ==================== 编码 ==================== */
 
 /** 注入式解码器：拿不到对应编码时返回 undefined。 */

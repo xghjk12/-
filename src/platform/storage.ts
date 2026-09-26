@@ -42,7 +42,41 @@ export interface PlaybackState {
   updatedAt: number;
 }
 
-/** 曲库存储契约。扫描、播放状态持久化、句柄持久化都只依赖它。 */
+/**
+ * 一首歌的歌词。
+ *
+ * 键是**曲目身份**（path）而不是缓存键：歌词属于"这首歌"，不该因为你改了标签、文件时间戳变了
+ * 就丢掉（与播放状态同一个理由，见技术方案 5.1）。
+ *
+ * 三种来源的优先级：`import` / `paste`（用户明确给的）> `sidecar`（扫描认领的同名 .lrc）。
+ * 扫描只在 sidecar 记录不存在、或 .lrc 文件变过时才覆盖。
+ */
+export interface LyricRecord {
+  path: string;
+  /** 解码后的歌词全文。 */
+  text: string;
+  source: 'sidecar' | 'import' | 'paste';
+  /** sidecar 来源时的 .lrc 相对路径。 */
+  lyricPath?: string;
+  /** sidecar 的修改时间，用来判断要不要重新读。 */
+  lyricModifiedAt?: number;
+  /** 用户微调的时间轴偏移（秒），正值表示歌词提前出现。 */
+  userOffsetSec: number;
+  updatedAt: number;
+}
+
+/** 应用设置（目前只有歌词搜索地址模板）。 */
+export interface AppSettings {
+  /**
+   * 歌词搜索地址模板，支持 `{title} {artist} {album} {trackNo} {keyword}`。
+   *
+   * 默认**不内置任何具体站点**：应用只负责拼出这条 URL 交给浏览器打开，
+   * 不请求、不解析第三方内容（见产品技术文档 2 节）。
+   */
+  lyricSearchTemplate: string;
+}
+
+/** 曲库存储契约。扫描、播放状态持久化、歌词、句柄持久化都只依赖它。 */
 export interface LibraryStorage {
   listFiles(): Promise<StoredFile[]>;
   putFiles(files: StoredFile[]): Promise<void>;
@@ -58,6 +92,14 @@ export interface LibraryStorage {
   putCovers(entries: Array<{ cacheKey: string; cover: CoverRecord }>): Promise<void>;
   deleteCovers(cacheKeys: string[]): Promise<void>;
 
+  getLyrics(path: string): Promise<LyricRecord | undefined>;
+  listLyrics(): Promise<LyricRecord[]>;
+  putLyrics(records: LyricRecord[]): Promise<void>;
+  deleteLyrics(paths: string[]): Promise<void>;
+
+  readSettings(): Promise<AppSettings | undefined>;
+  writeSettings(settings: AppSettings): Promise<void>;
+
   readState(): Promise<PlaybackState | undefined>;
   writeState(state: PlaybackState): Promise<void>;
 
@@ -65,7 +107,7 @@ export interface LibraryStorage {
   loadHandle(sourceId: string): Promise<unknown | undefined>;
   deleteHandle(sourceId: string): Promise<void>;
 
-  /** 「重置演示」「清空曲库」用：清掉全部缓存与句柄。 */
+  /** 「重置演示」「清空曲库」用：清掉全部缓存、歌词、设置与句柄。 */
   clearAll(): Promise<void>;
 }
 
@@ -73,14 +115,19 @@ interface QingyinDB extends DBSchema {
   files: { key: string; value: StoredFile };
   tracks: { key: string; value: Track };
   covers: { key: string; value: CoverRecord };
+  lyrics: { key: string; value: LyricRecord };
   state: { key: string; value: PlaybackState };
+  settings: { key: string; value: AppSettings };
   handles: { key: string; value: unknown };
 }
 
 export const DB_NAME = 'qingyin-player';
-export const DB_VERSION = 1;
+/** v2：加入 lyrics 与 settings 两个仓库（歌词适配）。 */
+export const DB_VERSION = 2;
 /** 播放状态固定用这一个键。 */
 export const STATE_KEY = 'playback';
+/** 设置固定用这一个键。 */
+export const SETTINGS_KEY = 'app';
 
 function wrap(db: IDBPDatabase<QingyinDB>): LibraryStorage {
   return {
@@ -135,6 +182,32 @@ function wrap(db: IDBPDatabase<QingyinDB>): LibraryStorage {
       await tx.done;
     },
 
+    async getLyrics(path) {
+      return db.get('lyrics', path);
+    },
+    async listLyrics() {
+      return db.getAll('lyrics');
+    },
+    async putLyrics(records) {
+      if (records.length === 0) return;
+      const tx = db.transaction('lyrics', 'readwrite');
+      for (const record of records) await tx.store.put(record, record.path);
+      await tx.done;
+    },
+    async deleteLyrics(paths) {
+      if (paths.length === 0) return;
+      const tx = db.transaction('lyrics', 'readwrite');
+      for (const path of paths) await tx.store.delete(path);
+      await tx.done;
+    },
+
+    async readSettings() {
+      return db.get('settings', SETTINGS_KEY);
+    },
+    async writeSettings(settings) {
+      await db.put('settings', settings, SETTINGS_KEY);
+    },
+
     async readState() {
       return db.get('state', STATE_KEY);
     },
@@ -153,12 +226,17 @@ function wrap(db: IDBPDatabase<QingyinDB>): LibraryStorage {
     },
 
     async clearAll() {
-      const tx = db.transaction(['files', 'tracks', 'covers', 'state', 'handles'], 'readwrite');
+      const tx = db.transaction(
+        ['files', 'tracks', 'covers', 'lyrics', 'state', 'settings', 'handles'],
+        'readwrite',
+      );
       await Promise.all([
         tx.objectStore('files').clear(),
         tx.objectStore('tracks').clear(),
         tx.objectStore('covers').clear(),
+        tx.objectStore('lyrics').clear(),
         tx.objectStore('state').clear(),
+        tx.objectStore('settings').clear(),
         tx.objectStore('handles').clear(),
       ]);
       await tx.done;
@@ -170,11 +248,18 @@ function wrap(db: IDBPDatabase<QingyinDB>): LibraryStorage {
 export async function indexedDbStorage(): Promise<LibraryStorage> {
   const db = await openDB<QingyinDB>(DB_NAME, DB_VERSION, {
     upgrade(database) {
-      database.createObjectStore('files', { keyPath: 'path' });
-      database.createObjectStore('tracks');
-      database.createObjectStore('covers');
-      database.createObjectStore('state');
-      database.createObjectStore('handles');
+      // 每个仓库都要判断存在性：升级回调在"从 v1 升到 v2"和"全新创建"两种情况下都会被调用，
+      // 重复 createObjectStore 会直接抛错。
+      if (!database.objectStoreNames.contains('files')) {
+        database.createObjectStore('files', { keyPath: 'path' });
+      }
+      if (!database.objectStoreNames.contains('tracks')) database.createObjectStore('tracks');
+      if (!database.objectStoreNames.contains('covers')) database.createObjectStore('covers');
+      if (!database.objectStoreNames.contains('state')) database.createObjectStore('state');
+      if (!database.objectStoreNames.contains('handles')) database.createObjectStore('handles');
+      // v2 新增
+      if (!database.objectStoreNames.contains('lyrics')) database.createObjectStore('lyrics');
+      if (!database.objectStoreNames.contains('settings')) database.createObjectStore('settings');
     },
   });
   return wrap(db);

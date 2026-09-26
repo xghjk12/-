@@ -13,9 +13,10 @@
  */
 import { isAudioFileName } from '../core/audioFormats.js';
 import { joinRelativePath } from '../core/library.js';
+import { isLyricFileName } from '../core/lyrics.js';
 import { blobByteSource } from './byteSource.js';
 import type { ByteSource } from './byteSource.js';
-import type { AudioFileRef, MusicSource } from './musicSource.js';
+import type { AudioFileRef, LyricFileRef, MusicSource } from './musicSource.js';
 
 /** 目录句柄在 IndexedDB 里用的键。 */
 export const MUSIC_SOURCE_ID = 'music-root';
@@ -75,7 +76,11 @@ export async function ensureReadPermission(handle: DirectoryHandleLike): Promise
 }
 
 /** 用已列出的 File 对象支撑 open()，避免再次按路径回溯目录树。 */
-function sourceFromFiles(rootName: string, files: Map<string, File>): BrowserMusicSource {
+function sourceFromFiles(
+  rootName: string,
+  files: Map<string, File>,
+  lyricFiles: Map<string, File>,
+): BrowserMusicSource {
   return {
     rootName,
     /**
@@ -103,6 +108,24 @@ function sourceFromFiles(rootName: string, files: Map<string, File>): BrowserMus
       if (!file) throw new Error(`找不到文件：${ref.path}`);
       return blobByteSource(file, ref.name);
     },
+    /** 歌词走单独一张表：音频与歌词是两类资源，混在一起会让"没有 .lrc"变得难以判断。 */
+    async listLyricFiles() {
+      const refs: LyricFileRef[] = [];
+      for (const [relativePath, file] of lyricFiles) {
+        refs.push({
+          path: relativePath,
+          name: file.name,
+          size: file.size,
+          lastModified: Math.floor(file.lastModified),
+        });
+      }
+      return refs;
+    },
+    async openLyricBytes(ref) {
+      const file = lyricFiles.get(ref.path);
+      if (!file) throw new Error(`找不到歌词文件：${ref.path}`);
+      return new Uint8Array(await file.arrayBuffer());
+    },
   };
 }
 
@@ -122,6 +145,7 @@ export async function collectFromDirectoryHandle(
   onProgress?: (found: number) => void,
 ): Promise<BrowserMusicSource> {
   const files = new Map<string, File>();
+  const lyricFiles = new Map<string, File>();
   let sinceYield = 0;
 
   async function walk(current: DirectoryHandleLike, relativeDir: string): Promise<void> {
@@ -129,6 +153,11 @@ export async function collectFromDirectoryHandle(
       const relativePath = joinRelativePath(relativeDir, entry.name);
       if (entry.kind === 'directory') {
         await walk(entry as DirectoryHandleLike, relativePath);
+        continue;
+      }
+      // 歌词文件与音频一起收，但记在各自的表里
+      if (isLyricFileName(entry.name)) {
+        lyricFiles.set(relativePath, await (entry as FileHandleLike).getFile());
         continue;
       }
       if (!isAudioFileName(entry.name)) continue;
@@ -143,7 +172,7 @@ export async function collectFromDirectoryHandle(
   }
 
   await walk(handle, '');
-  return sourceFromFiles(handle.name, files);
+  return sourceFromFiles(handle.name, files, lyricFiles);
 }
 
 /**
@@ -155,6 +184,7 @@ export async function collectFromDirectoryHandle(
  */
 export function sourceFromFileList(fileList: FileList): BrowserMusicSource {
   const files = new Map<string, File>();
+  const lyricFiles = new Map<string, File>();
   let rootName = '';
 
   for (const file of Array.from(fileList)) {
@@ -164,10 +194,11 @@ export function sourceFromFileList(fileList: FileList): BrowserMusicSource {
 
     // 去掉根目录段；没有 webkitRelativePath 时退回文件名
     const path = joinRelativePath(segments.slice(1).join('/')) || joinRelativePath(file.name);
-    if (isAudioFileName(path)) files.set(path, file);
+    if (isLyricFileName(path)) lyricFiles.set(path, file);
+    else if (isAudioFileName(path)) files.set(path, file);
   }
 
-  return sourceFromFiles(rootName || '已选择的文件夹', files);
+  return sourceFromFiles(rootName || '已选择的文件夹', files, lyricFiles);
 }
 
 export interface PickedDirectory {

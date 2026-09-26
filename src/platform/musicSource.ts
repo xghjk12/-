@@ -23,4 +23,22 @@ export interface MusicSource {
   listAudioFiles(onProgress?: (found: number) => void): Promise<AudioFileRef[]>;
   /** 打开某个文件用于解析元数据。 */
   open(ref: AudioFileRef): Promise<ByteSource>;
+  /**
+   * 列出曲库里的歌词文件（`.lrc`）。
+   *
+   * 做成可选，而且**"不实现"与"返回空数组"含义不同**：歌词同步会用"某个 .lrc 不再出现"
+   * 判断用户把它删了并清理缓存，所以不支持歌词的来源必须压根不实现这两个方法，
+   * 而不是返回空数组（否则会把已有歌词全清掉）。
+   */
+  listLyricFiles?(): Promise<LyricFileRef[]>;
+  /** 读取歌词文件原始字节（编码判断交给 `core/lyrics.ts` 的 decodeLyrics）。 */
+  openLyricBytes?(ref: LyricFileRef): Promise<Uint8Array>;
+}
+
+/** 歌词文件引用。比 core 的匹配输入多几个字段，多出来的会被忽略。 */
+export interface LyricFileRef {
+  path: string;
+  name: string;
+  size: number;
+  lastModified: number;
 }
