@@ -1,18 +1,23 @@
 /**
- * 元数据解析的 M0 验证测试，输入是 `scripts/make-fixtures.mjs` 用 ffmpeg 生成的真实文件。
+ * 元数据解析的测试，输入是 `scripts/make-fixtures.mjs` 用 ffmpeg 生成的真实文件。
  *
- * 这些用例锁住的是 M0 的两个关键结论：
+ * 锁住三件事：
  *  1. flac / mp3 的标签、封面、时长都能正确读出（含中文）
- *  2. 头部够用时不读整个文件；头部不够时才回退——用"读了哪些区间"来断言，而不是靠感觉
+ *  2. 三级读取策略（技术方案 4.1）真的按预期走——用"读了哪些区间"断言，而不是靠感觉：
+ *     L1 探测 → 元数据区更大时只多读那一块 → 都读不出标签时才读整文件
+ *  3. 失败与不支持格式不会抛异常，坏文件不中断扫描
  */
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ByteSource } from './byteSource.js';
-import { DEFAULT_HEAD_BYTES, readMetadata } from './metadata.js';
+import { DEFAULT_PROBE_BYTES, readMetadata } from './metadata.js';
 
 const fixtureDir = fileURLToPath(new URL('../../tests/fixtures/', import.meta.url));
+
+/** fixture 的 FLAC 元数据区实测结束偏移（STREAMINFO + SEEKTABLE + VORBIS_COMMENT + PICTURE）。 */
+const FLAC_FIXTURE_REGION_END = 8697;
 
 interface RecordingSource extends ByteSource {
   /** 记录每次读取的 [start, end)，用于断言 I/O 行为。 */
@@ -95,23 +100,39 @@ describe('readMetadata：MP3', () => {
   });
 });
 
-describe('readMetadata：读取策略（I/O 行为）', () => {
-  it('头部够用时只读一次，不读整个文件', async () => {
+describe('readMetadata：三级读取策略（I/O 行为）', () => {
+  it('L1：探测区覆盖整个元数据区时只读一次', async () => {
     const source = await fixtureSource('sample-cn.flac');
-    // 8KB 远小于文件本身，但已包含 STREAMINFO 与 Vorbis comment
-    const metadata = await readMetadata(source, { headBytes: 8192 });
+    // 默认 16KB 探测已覆盖 8697 字节的元数据区
+    const metadata = await readMetadata(source);
 
-    expect(metadata.readStrategy).toBe('head');
-    expect(source.reads).toEqual([[0, 8192]]);
-    expect(metadata.bytesRead).toBe(8192);
+    expect(metadata.readStrategy).toBe('probe');
+    expect(source.reads).toEqual([[0, DEFAULT_PROBE_BYTES]]);
+    expect(metadata.bytesRead).toBe(DEFAULT_PROBE_BYTES);
     expect(metadata.title).toBe('青花瓷');
-    expect(metadata.durationSec).toBeCloseTo(2, 1);
-    expect(source.size).toBeGreaterThan(8192);
+    expect(metadata.cover?.mimeType).toBe('image/jpeg');
   });
 
-  it('头部不足以读出标签时，回退读整个文件', async () => {
+  it('L2：元数据区大于探测窗口时只多读这一块，不读整文件', async () => {
     const source = await fixtureSource('sample-cn.flac');
-    const metadata = await readMetadata(source, { headBytes: 64 });
+    // 4KB 探测：块头都在里面（够算出元数据区），但封面在窗口之外
+    const metadata = await readMetadata(source, { probeBytes: 4096 });
+
+    expect(metadata.readStrategy).toBe('region');
+    expect(source.reads).toEqual([
+      [0, 4096],
+      [0, FLAC_FIXTURE_REGION_END],
+    ]);
+    expect(metadata.bytesRead).toBe(4096 + FLAC_FIXTURE_REGION_END);
+    // 关键收益：排在探测窗口之后的大封面不会被静默漏掉，而且始终没有读整个文件
+    expect(metadata.cover?.mimeType).toBe('image/jpeg');
+    expect(source.reads.every(([, end]) => end < source.size)).toBe(true);
+  });
+
+  it('L3：探测区读不出标签时回退读整个文件', async () => {
+    const source = await fixtureSource('sample-cn.flac');
+    // 64 字节连 metadata block 都走不完
+    const metadata = await readMetadata(source, { probeBytes: 64 });
 
     expect(metadata.readStrategy).toBe('full');
     expect(source.reads).toEqual([
@@ -121,20 +142,31 @@ describe('readMetadata：读取策略（I/O 行为）', () => {
     expect(metadata.title).toBe('青花瓷');
   });
 
-  it('文件小于头部上限时只读一次，不会重复读', async () => {
+  it('探测上限大于文件本身时只读一次，不会重复读', async () => {
     const source = await fixtureSource('sample-cn.mp3');
-    expect(source.size).toBeLessThan(DEFAULT_HEAD_BYTES);
+    const metadata = await readMetadata(source, { probeBytes: 1024 * 1024 });
 
-    const metadata = await readMetadata(source);
     expect(source.reads).toEqual([[0, source.size]]);
-    expect(metadata.readStrategy).toBe('head');
+    expect(metadata.readStrategy).toBe('probe');
   });
 
   it('字节数统计与实际读取量一致', async () => {
     const source = await fixtureSource('sample-cn.flac');
-    const metadata = await readMetadata(source, { headBytes: 4096 });
+    const metadata = await readMetadata(source, { probeBytes: 4096 });
     const total = source.reads.reduce((sum, [from, to]) => sum + (to - from), 0);
     expect(metadata.bytesRead).toBe(total);
+  });
+
+  it('没有标签的文件才需要读整文件（L3 是兜底而不是常规路径）', async () => {
+    const source = await fixtureSource('plain.mp3');
+    const metadata = await readMetadata(source);
+
+    expect(metadata.readStrategy).toBe('full');
+    expect(source.reads).toEqual([
+      [0, DEFAULT_PROBE_BYTES],
+      [0, source.size],
+    ]);
+    expect(metadata.titleFromFileName).toBe(true);
   });
 });
 
@@ -161,5 +193,10 @@ describe('readMetadata：异常与不支持格式', () => {
     const metadata = await readMetadata(empty);
     expect(metadata.parseError).toBeTruthy();
     expect(metadata.title).toBe('empty');
+  });
+
+  it('文件名里的音轨号前缀不会留在回退标题里', async () => {
+    const metadata = await readMetadata(await fixtureSource('fake.ape', '03 - 某首老歌.ape'));
+    expect(metadata.title).toBe('某首老歌');
   });
 });

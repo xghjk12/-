@@ -39,7 +39,7 @@ describe.skipIf(!musicDir)('真实曲库冒烟检查', () => {
       const extension = extensionOf(file.name);
       byExtension.set(extension, (byExtension.get(extension) ?? 0) + 1);
       bytesRead += metadata.bytesRead;
-      if (metadata.readStrategy === 'head') headOnly += 1;
+      if (metadata.readStrategy !== 'full') headOnly += 1;
       if (metadata.cover) coverCount += 1;
 
       // 乱码粗检：出现 U+FFFD 替换字符，或标题里混入大量拉丁补充区字符

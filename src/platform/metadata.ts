@@ -1,26 +1,34 @@
 /**
- * 元数据解析。M0 已用真实 flac / mp3 验证过这条路径。
+ * 元数据解析：三级读取策略（技术方案 4.1）。
  *
- * 读取策略分两级，目的是别把整个文件读进来：
- *  1. 先读文件头（默认 512KB）。FLAC 的 STREAMINFO + Vorbis comment、MP3 的 ID3v2
- *     都在文件开头，实测 1KB 就足够读出标题、艺术家与封面。
- *  2. 只有当头部读不出任何标题/艺术家/专辑时，才回退读整个文件——这是为了兜住
- *     标签只写在文件尾部的情况（典型是只有 ID3v1 的老 mp3）。
+ * M0 的两条实测结论决定了这里的形状：
+ *  1. 解析耗时与读多少字节无关（`parseBuffer` 只走它需要的元数据块），成本纯粹在磁盘 I/O
+ *  2. 真实文件的元数据区小得惊人——FLAC 8.6KB / MP3 351B，而固定读 512KB 是所需量的几十倍，
+ *     却又**不能保证**覆盖排在后面的大封面
  *
- * 解析失败不抛异常，而是把原因放进 `parseError` 并回退到文件名标题，避免一个坏文件
- * 中断整次扫描。
+ * 所以改成按容器结构算准范围：
+ *  - L1 探测：前 16KB。同时用它算出元数据区结束位置
+ *  - L2 精确区：元数据区比探测更长时，只多读这一块（大封面不会再被静默漏掉）
+ *  - L3 全文件：L1/L2 都没读出标题/艺术家/专辑时（兜住只写在文件尾部的 ID3v1 老 mp3）
+ *
+ * 另外两件事也在这里兜住：解析失败不抛异常（一个坏文件不中断整次扫描），
+ * 以及 GBK 老标签的回退（技术方案 4.3）。
  */
 import { parseBuffer, selectCover } from 'music-metadata';
+import { DEFAULT_PROBE_BYTES, metadataRegionEnd } from '../core/metadataRegion.js';
 import { guessTitle } from '../core/library.js';
+import { fixGbkMojibake } from '../core/tagEncoding.js';
 import type { ByteSource } from './byteSource.js';
 
-/** 默认只读的头部字节数。1KB 实测已够用，留 512KB 是为体积较大的内嵌封面留余量。 */
-export const DEFAULT_HEAD_BYTES = 512 * 1024;
+export { DEFAULT_PROBE_BYTES };
 
 export interface CoverImage {
   mimeType: string;
   data: Uint8Array;
 }
+
+/** 实际采用的读取级别，用于在扫描统计里解释代价。 */
+export type ReadStrategy = 'probe' | 'region' | 'full';
 
 export interface TrackMetadata {
   title: string;
@@ -38,9 +46,8 @@ export interface TrackMetadata {
   bitrate?: number;
   sampleRate?: number;
   cover?: CoverImage;
-  /** 实际采用的读取策略，用于在扫描进度里解释代价。 */
-  readStrategy: 'head' | 'full';
-  /** 实际读取的字节数，测试用它锁住"头部够用就不读整文件"。 */
+  readStrategy: ReadStrategy;
+  /** 实际读取的字节数，测试用它锁住「头部够用就不读整文件」。 */
   bytesRead: number;
   /** 解析失败的原因；成功时为 undefined。 */
   parseError?: string;
@@ -48,9 +55,7 @@ export interface TrackMetadata {
 
 type ParsedMetadata = Awaited<ReturnType<typeof parseBuffer>>;
 
-type ParseOutcome =
-  | { ok: true; metadata: ParsedMetadata }
-  | { ok: false; error: Error };
+type ParseOutcome = { ok: true; metadata: ParsedMetadata } | { ok: false; error: Error };
 
 async function parseBytes(bytes: Uint8Array, totalSize: number): Promise<ParseOutcome> {
   try {
@@ -60,8 +65,8 @@ async function parseBytes(bytes: Uint8Array, totalSize: number): Promise<ParseOu
   }
 }
 
-/** 头部是否已经读到足够的信息，不必再读整个文件。 */
-function headIsEnough(outcome: ParseOutcome): boolean {
+/** 已经读到足够的标签信息，不必再往下读。 */
+function hasCoreTags(outcome: ParseOutcome): boolean {
   if (!outcome.ok) return false;
   const { title, artist, album } = outcome.metadata.common;
   return Boolean(title || artist || album);
@@ -70,7 +75,7 @@ function headIsEnough(outcome: ParseOutcome): boolean {
 function buildResult(
   outcome: ParseOutcome,
   source: ByteSource,
-  readStrategy: 'head' | 'full',
+  readStrategy: ReadStrategy,
   bytesRead: number,
 ): TrackMetadata {
   const fallbackTitle = guessTitle(source.name);
@@ -87,13 +92,15 @@ function buildResult(
 
   const { common, format } = outcome.metadata;
   const picture = selectCover(common.picture);
+  // GBK 老标签只会出现在标签里；文件名回退出来的标题本来就是对的不必处理
+  const title = fixGbkMojibake(common.title);
 
   return {
-    title: common.title ?? fallbackTitle,
-    titleFromFileName: !common.title,
-    artist: common.artist,
-    album: common.album,
-    albumArtist: common.albumartist,
+    title: title ?? fallbackTitle,
+    titleFromFileName: !title,
+    artist: fixGbkMojibake(common.artist),
+    album: fixGbkMojibake(common.album),
+    albumArtist: fixGbkMojibake(common.albumartist),
     year: common.year,
     trackNo: common.track?.no ?? undefined,
     durationSec: format.duration,
@@ -109,23 +116,39 @@ function buildResult(
 }
 
 export interface ReadMetadataOptions {
-  /** 覆盖默认头部读取长度，测试用它构造"头部不够"的场景。 */
-  headBytes?: number;
+  /** 覆盖 L1 探测长度，测试用它构造「探测区不够」的场景。 */
+  probeBytes?: number;
 }
 
 export async function readMetadata(
   source: ByteSource,
   options: ReadMetadataOptions = {},
 ): Promise<TrackMetadata> {
-  const headBytes = options.headBytes ?? DEFAULT_HEAD_BYTES;
-  const headLimit = Math.min(headBytes, source.size);
+  const probeBytes = options.probeBytes ?? DEFAULT_PROBE_BYTES;
+  const probeLimit = Math.min(probeBytes, source.size);
 
-  const head = await source.read(0, headLimit);
-  let bytesRead = head.length;
-  let readStrategy: 'head' | 'full' = 'head';
-  let outcome = await parseBytes(head, source.size);
+  // ---- L1 探测 ----
+  const probe = await source.read(0, probeLimit);
+  let bytesRead = probe.length;
+  let coveredBytes = probe.length;
+  let readStrategy: ReadStrategy = 'probe';
+  let outcome = await parseBytes(probe, source.size);
 
-  if (!headIsEnough(outcome) && headLimit < source.size) {
+  // ---- L2 精确区：只多读元数据区这一块 ----
+  const region = metadataRegionEnd(probe);
+  if (region !== undefined && region > probe.length && region <= source.size) {
+    const bytes = await source.read(0, region);
+    bytesRead += bytes.length;
+    coveredBytes = Math.max(coveredBytes, bytes.length);
+    const regionOutcome = await parseBytes(bytes, source.size);
+    if (regionOutcome.ok) {
+      outcome = regionOutcome;
+      readStrategy = 'region';
+    }
+  }
+
+  // ---- L3 全文件：只在前面都没读出核心标签时 ----
+  if (!hasCoreTags(outcome) && coveredBytes < source.size) {
     const whole = await source.read(0, source.size);
     bytesRead += whole.length;
     const wholeOutcome = await parseBytes(whole, source.size);

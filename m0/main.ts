@@ -95,7 +95,7 @@ async function runSelfTest(): Promise<void> {
     { label: 'flac 艺术家（中文）', actual: flac.metadata.artist, expected: '周杰伦' },
     { label: 'flac 专辑（中文）', actual: flac.metadata.album, expected: '我很忙' },
     { label: 'flac 时长', actual: Math.round(flac.metadata.durationSec ?? 0), expected: 2 },
-    { label: 'flac 读取策略', actual: flac.metadata.readStrategy, expected: 'head' },
+    { label: 'flac 读取策略', actual: flac.metadata.readStrategy, expected: 'probe' },
     {
       label: 'flac 封面类型',
       actual: flac.metadata.cover?.mimeType ?? null,
@@ -103,7 +103,7 @@ async function runSelfTest(): Promise<void> {
     },
     { label: 'mp3 标题（中文）', actual: mp3.metadata.title, expected: '青花瓷' },
     { label: 'mp3 时长', actual: Math.round(mp3.metadata.durationSec ?? 0), expected: 2 },
-    { label: 'mp3 读取策略', actual: mp3.metadata.readStrategy, expected: 'head' },
+    { label: 'mp3 读取策略', actual: mp3.metadata.readStrategy, expected: 'probe' },
   ];
 
   const passed = renderChecks(selfTestResult, '内置自检（music-metadata + parseBuffer）', checks);
@@ -111,7 +111,7 @@ async function runSelfTest(): Promise<void> {
     `内置自检完成：${passed ? '全部通过' : '存在失败项'}\n` +
       `flac ${(flac.size / 1024).toFixed(1)}KB 解析 ${flac.elapsedMs.toFixed(1)}ms\n` +
       `mp3  ${(mp3.size / 1024).toFixed(1)}KB 解析 ${mp3.elapsedMs.toFixed(1)}ms\n` +
-      `两个文件都只读了文件头（readStrategy=head）。`,
+      `两个文件都只读了文件头（readStrategy=probe）。`,
   );
 }
 
@@ -140,7 +140,7 @@ async function runLibraryCheck(source: MusicSource): Promise<void> {
   for (const [index, ref] of files.entries()) {
     const metadata = await readMetadata(await source.open(ref));
     bytesRead += metadata.bytesRead;
-    if (metadata.readStrategy === 'head') headOnly += 1;
+    if (metadata.readStrategy !== 'full') headOnly += 1;
     if (metadata.cover) covers += 1;
     if (metadata.parseError) failures += 1;
     byExtension.set(
