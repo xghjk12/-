@@ -1,0 +1,25 @@
+{
+  "name": "qingyin-player",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "轻音播放 —— 本地音乐播放器",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "build:m0": "vite build",
+    "check:bundle": "node scripts/check-browser-bundle.mjs",
+    "verify": "pnpm typecheck && pnpm test && pnpm check:bundle"
+  },
+  "dependencies": {
+    "music-metadata": "^11.16.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  }
+}
