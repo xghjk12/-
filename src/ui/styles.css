@@ -667,8 +667,9 @@ button {
 .btn-icon {
   display: grid;
   place-items: center;
-  width: 30px;
+  min-width: 30px;
   height: 30px;
+  padding: 0 6px;
   border-radius: 7px;
   color: var(--muted);
 }
@@ -684,6 +685,7 @@ button {
 
 .mode-text {
   font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .btn-play {
