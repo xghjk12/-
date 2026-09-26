@@ -51,6 +51,25 @@ export interface ScanStats {
   bytesRead: number;
   elapsedMs: number;
   aborted: boolean;
+  /**
+   * 分项耗时。
+   *
+   * 加这个是因为实测发现「全命中」的扫描并不像预期的那样接近 0：3000 首仍要 2.6s。
+   * 光看总时长分不清是读 IndexedDB、遍历来源、还是每批让出事件循环的固定开销，
+   * 所以把四段分开量——首次扫描与全命中扫描的瓶颈往往不是同一段。
+   */
+  timing: {
+    /** 读 files 目录清单。 */
+    listFilesMs: number;
+    /** 读全部元数据缓存（全命中路径的主要嫌疑）。 */
+    cachedTracksMs: number;
+    /** 遍历来源列出音频文件。 */
+    sourceListMs: number;
+    /** 逐文件比对/解析。 */
+    loopMs: number;
+    /** 清理过期与孤儿缓存。 */
+    cleanupMs: number;
+  };
 }
 
 export interface ScanResult {
@@ -90,12 +109,18 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanResult> {
   const batchSize = Math.max(1, options.batchSize ?? 25);
   const startedAt = now();
 
-  const previousFiles = new Map<string, StoredFile>();
-  for (const file of await storage.listFiles()) previousFiles.set(file.path, file);
+  const timing = { listFilesMs: 0, cachedTracksMs: 0, sourceListMs: 0, loopMs: 0, cleanupMs: 0 };
 
-  // 先整体读出来，命中时不必逐条 getTrack
+  const previousFiles = new Map<string, StoredFile>();
+  const listFilesStart = now();
+  for (const file of await storage.listFiles()) previousFiles.set(file.path, file);
+  timing.listFilesMs = now() - listFilesStart;
+
+  // 先整体读出来，命中时不必逐条 getTrack（这段在"全命中"扫描里是主要开销，所以要单独计时）
   const cachedTracks = new Map<string, Track>();
+  const cachedStart = now();
   for (const track of await storage.listTracks()) cachedTracks.set(track.cacheKey, track);
+  timing.cachedTracksMs = now() - cachedStart;
 
   const state = {
     found: 0,
@@ -104,10 +129,14 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanResult> {
     failed: 0,
   };
 
+  const sourceListStart = now();
   const listed = await source.listAudioFiles((found) => {
     state.found = found;
     onProgress({ phase: 'listing', ...state, total: 0 });
   });
+  timing.sourceListMs = now() - sourceListStart;
+
+  const loopStart = now();
 
   const aborted = () => signal?.aborted ?? false;
   const tracks: Track[] = [];
@@ -185,6 +214,7 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanResult> {
 
   // 取消时也要把已解析的成果落库：它们是有效的缓存条目
   await flush();
+  timing.loopMs = now() - loopStart;
 
   const stats: ScanStats = {
     total: listed.length,
@@ -195,6 +225,7 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanResult> {
     bytesRead,
     elapsedMs: now() - startedAt,
     aborted: wasAborted,
+    timing,
   };
 
   if (wasAborted) {
@@ -203,6 +234,7 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanResult> {
   }
 
   // ---- 清理：先删「不在磁盘上」的，再删「没有 files 引用」的孤儿 ----
+  const cleanupStart = now();
   const stalePaths = [...previousFiles.keys()].filter((path) => !seen.has(path));
   const staleKeys = stalePaths.map((path) => previousFiles.get(path)!.cacheKey);
 
@@ -216,6 +248,9 @@ export async function scanLibrary(options: ScanOptions): Promise<ScanResult> {
     await storage.deleteCovers(deadKeys);
   }
   stats.removed = stalePaths.length;
+  timing.cleanupMs = now() - cleanupStart;
+  // 总时长在清理之后才能定稿
+  stats.elapsedMs = now() - startedAt;
 
   progress('done');
   return { tracks, stats };

@@ -70,12 +70,17 @@ tests/fixtures/  真实音频样本（ffmpeg 生成，已提交，pnpm test 不�
 
 ```bash
 pnpm typecheck      # tsc --noEmit
-pnpm test           # 237 项单测（core / platform / ui playback）
+pnpm test           # 283 项单测（core / platform / ui）
 pnpm test:demo      # 37 项交互原型的 node:test 检查
 pnpm check:static   # 界面层静态一致性（类名与样式、冒烟选择器）
 pnpm check:bundle   # 构建 + 扫产物里的 node: 引用 + PWA 外壳检查
-pnpm check:ui       # 真实 Edge 里的界面冒烟（内置自检 + 完整播放链路 + 截图）
+pnpm check:ui       # 真实 Edge 里的界面冒烟（内置自检 + 完整播放链路 + 刷新后缓存/状态恢复 + 截图）
+pnpm bench          # 真实浏览器 + 3000 首真实文件的性能基准（pnpm bench 500 可小规模快跑）
 ```
+
+`pnpm bench` 会现生成一份 3000 首的测试曲库（`.bench-library/`，跑完自动删除），
+逐个量出首次扫描、全命中重扫、刷新到列表可见、滚动帧率与实际读取字节数。3000 首实测：
+首次扫描 9.4s、刷新到可见 241ms、读取 46.4MB、滚动 60fps。详见 [技术方案 6.2](docs/技术方案.md)。
 
 界面冒烟用 `playwright-core` 驱动**本机已有的 Edge**（不下载 Chromium），它验证的是自动化能覆盖的部分：
 页面跑得起来、无控制台报错、内置自检（`?selftest=1`）逐项通过、内置样本能入库并真的出声、

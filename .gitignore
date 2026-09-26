@@ -6,6 +6,9 @@ artifacts/
 *.log
 .DS_Store
 
+# 基准测试生成的曲库（scripts/make-bench-fixtures.mjs）
+.bench-library/
+
 # 本地试听用的真实音频：不要提交（tests/fixtures 下的测试样本除外）
 *.flac
 *.mp3

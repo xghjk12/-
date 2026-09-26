@@ -49,6 +49,8 @@ export interface Notice {
 }
 
 export interface ScanStatus {
+  /** 本轮扫描的序号：界面与自动化脚本靠它区分"上一轮"和"这一轮"。 */
+  runId: number;
   active: boolean;
   phase: 'idle' | 'listing' | 'parsing' | 'done' | 'aborted';
   found: number;
@@ -65,9 +67,26 @@ export interface ScanStatus {
   bytesRead: number;
   /** 清理掉的、已经不在磁盘上的文件数。 */
   removed: number;
+  /** 分项耗时：用来回答"这次扫描的时间花在哪了"。 */
+  timing: {
+    listFilesMs: number;
+    cachedTracksMs: number;
+    sourceListMs: number;
+    loopMs: number;
+    cleanupMs: number;
+  };
 }
 
+const IDLE_TIMING = {
+  listFilesMs: 0,
+  cachedTracksMs: 0,
+  sourceListMs: 0,
+  loopMs: 0,
+  cleanupMs: 0,
+};
+
 const IDLE_SCAN: ScanStatus = {
+  runId: 0,
   active: false,
   phase: 'idle',
   found: 0,
@@ -79,6 +98,7 @@ const IDLE_SCAN: ScanStatus = {
   elapsedMs: 0,
   bytesRead: 0,
   removed: 0,
+  timing: IDLE_TIMING,
 };
 
 export const MODE_TEXT: Record<PlayMode, string> = {
@@ -165,6 +185,7 @@ let controller: PlaybackController | undefined;
 let currentSource: BrowserMusicSource | undefined;
 let services: Services | undefined;
 let scanAbort: AbortController | undefined;
+let scanRunId = 0;
 let booting: Promise<void> | undefined;
 let noticeSeq = 0;
 /** 播放进度：高频变化，刻意留在 React 之外。 */
@@ -413,8 +434,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
     currentSource = source;
     if (handle) await services.storage.saveHandle(MUSIC_SOURCE_ID, handle);
 
+    scanRunId += 1;
     set({
-      scan: { ...IDLE_SCAN, active: true, phase: 'listing', listingMs },
+      scan: { ...IDLE_SCAN, runId: scanRunId, active: true, phase: 'listing', listingMs },
       rootName: source.rootName,
     });
 
@@ -449,6 +471,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       hasSource: true,
       canRestore: Boolean(handle) || get().canRestore,
       scan: {
+        runId: scanRunId,
         active: false,
         phase: stats.aborted ? 'aborted' : 'done',
         found: stats.total,
@@ -460,6 +483,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         elapsedMs: stats.elapsedMs,
         bytesRead: stats.bytesRead,
         removed: stats.removed,
+        timing: stats.timing,
       },
     });
 

@@ -19,6 +19,7 @@
     "check:bundle": "node scripts/check-browser-bundle.mjs",
     "check:static": "node scripts/check-ui-static.mjs",
     "check:ui": "node scripts/check-ui.mjs",
+    "bench": "node scripts/bench-library.mjs",
     "verify": "pnpm typecheck && pnpm test && pnpm test:demo && pnpm check:static && pnpm check:bundle"
   },
   "dependencies": {
