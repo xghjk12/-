@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>轻音播放 · 交互 Demo</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="app">
+  <!-- ==================== 侧栏 ==================== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">轻</span>
+      <span class="brand-text">
+        <strong>轻音播放</strong>
+        <small>交互 Demo · 数据为模拟</small>
+      </span>
+    </div>
+
+    <button class="btn-primary btn-block" id="btnPick">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+      选择音乐文件夹
+    </button>
+
+    <div class="folder-card" id="folderCard">
+      <div class="folder-path" id="folderPath">未选择文件夹</div>
+      <div class="folder-meta" id="folderMeta">曲库为空</div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-item is-active" data-view="all"><span>全部曲目</span><em id="cntAll">0</em></button>
+      <button class="nav-item" data-view="artists"><span>艺术家</span><em id="cntArtists">0</em></button>
+      <button class="nav-item" data-view="albums"><span>专辑</span><em id="cntAlbums">0</em></button>
+      <button class="nav-item" data-view="recent"><span>最近添加</span><em id="cntRecent">0</em></button>
+      <button class="nav-item" data-view="unsupported"><span>不支持格式</span><em id="cntUnsupported">0</em></button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="lib-stat" id="libStat">曲库为空</div>
+      <button class="btn-ghost btn-block" id="btnReset">重置演示</button>
+    </div>
+  </aside>
+
+  <!-- ==================== 主区 ==================== -->
+  <main class="main">
+    <header class="topbar">
+      <div class="view-head">
+        <h1 id="viewTitle">全部曲目</h1>
+        <p id="viewSub">尚未导入曲库</p>
+      </div>
+      <div class="tools">
+        <label class="search">
+          <svg viewBox="0 0 24 24" class="ico"><path d="M10 3a7 7 0 1 0 4.2 12.6l4.1 4.1 1.4-1.4-4.1-4.1A7 7 0 0 0 10 3m0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10"/></svg>
+          <input id="search" type="search" placeholder="搜索标题、艺术家、专辑" autocomplete="off" disabled />
+        </label>
+        <select id="sortKey" title="排序方式" disabled></select>
+        <button class="icon-btn" id="btnSortDir" title="切换升序 / 降序" disabled>↑</button>
+        <button class="btn-primary" id="btnPlayAll" disabled>播放全部</button>
+      </div>
+    </header>
+    <div class="content" id="content"></div>
+  </main>
+</div>
+
+<!-- ==================== 播放条 ==================== -->
+<footer class="player">
+  <div class="now">
+    <div class="now-cover" id="nowCover"><span>♪</span></div>
+    <div class="now-meta">
+      <div class="now-title" id="nowTitle">未在播放</div>
+      <div class="now-artist" id="nowArtist">双击列表中的曲目开始播放</div>
+    </div>
+  </div>
+
+  <div class="transport">
+    <div class="transport-row">
+      <button class="chip" id="btnMode" title="切换播放模式">顺序播放</button>
+      <button class="icon-btn" id="btnPrev" title="上一首">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M6 6h2v12H6zm12 0v12l-9-6z"/></svg>
+      </button>
+      <button class="play-btn" id="btnPlay" title="播放 / 暂停（空格）">
+        <svg viewBox="0 0 24 24" class="ico" id="playIcon"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="icon-btn" id="btnNext" title="下一首">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M16 6h2v12h-2zM6 18V6l9 6z"/></svg>
+      </button>
+      <button class="icon-btn" id="btnDrawer" title="播放队列">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h10v2H4z"/></svg>
+      </button>
+    </div>
+    <div class="progress-row">
+      <span class="t" id="tNow">0:00</span>
+      <div class="progress" id="progress">
+        <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-knob" id="progressKnob"></div>
+      </div>
+      <span class="t" id="tTotal">0:00</span>
+    </div>
+  </div>
+
+  <div class="player-right">
+    <button class="icon-btn" id="btnMute" title="静音"></button>
+    <input id="volume" class="vol" type="range" min="0" max="100" value="80" title="音量" />
+    <button class="chip" id="btnSpeed" title="演示用：加速进度推进，便于观察自动切歌">×1</button>
+  </div>
+</footer>
+
+<!-- ==================== 播放队列抽屉 ==================== -->
+<div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <header class="drawer-head">
+    <h2>播放队列</h2>
+    <div class="drawer-actions">
+      <button class="btn-ghost" id="btnClearQueue">清空</button>
+      <button class="icon-btn" id="btnCloseDrawer" title="关闭">✕</button>
+    </div>
+  </header>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<!-- ==================== 文件夹选择 / 扫描弹窗 ==================== -->
+<div class="modal-backdrop" id="folderModal" hidden>
+  <div class="modal">
+    <div id="pickStep">
+      <header class="modal-head">
+        <h2>选择音乐文件夹</h2>
+        <p>Demo 中这里是模拟的目录选择器。真实版本将调用 <code>showDirectoryPicker()</code>，文件不会被上传。</p>
+      </header>
+      <div class="crumb" id="crumb"></div>
+      <div class="file-list" id="fileList"></div>
+      <footer class="modal-foot">
+        <span class="modal-note">将递归扫描子文件夹中的音频文件</span>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="btnPickCancel">取消</button>
+          <button class="btn-primary" id="btnPickConfirm">选择此文件夹</button>
+        </div>
+      </footer>
+    </div>
+
+    <div id="scanStep" hidden>
+      <header class="modal-head">
+        <h2>正在扫描并解析元数据</h2>
+        <p>读取标签、内嵌封面与时长，结果将写入曲库缓存。</p>
+      </header>
+      <div class="scan-body">
+        <div class="scan-file" id="scanFile">准备中…</div>
+        <div class="scan-bar"><div class="scan-fill" id="scanFill"></div></div>
+        <div class="scan-foot">
+          <span id="scanCount">0 / 24</span>
+          <span class="scan-warn" id="scanWarn"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
