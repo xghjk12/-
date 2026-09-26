@@ -11,13 +11,15 @@
     "build:m0": "vite build --config vite.m0.config.ts",
     "preview": "vite preview --port 4173 --strictPort",
     "test": "vitest run",
+    "test:demo": "node --test demo/core.test.cjs demo/ui-check.cjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "fixtures": "node scripts/make-fixtures.mjs",
     "icons": "node scripts/make-icons.mjs",
     "check:bundle": "node scripts/check-browser-bundle.mjs",
+    "check:static": "node scripts/check-ui-static.mjs",
     "check:ui": "node scripts/check-ui.mjs",
-    "verify": "pnpm typecheck && pnpm test && pnpm check:bundle"
+    "verify": "pnpm typecheck && pnpm test && pnpm test:demo && pnpm check:static && pnpm check:bundle"
   },
   "dependencies": {
     "idb": "^8.0.3",
