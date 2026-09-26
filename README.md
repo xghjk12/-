@@ -79,7 +79,7 @@ tests/fixtures/  真实音频样本（ffmpeg 生成，已提交，pnpm test 不�
 
 ```bash
 pnpm typecheck      # tsc --noEmit
-pnpm test           # 331 项单测（core / platform / ui）
+pnpm test           # 330 项单测（core / platform / ui）
 pnpm test:demo      # 37 项交互原型的 node:test 检查
 pnpm check:static   # 界面层静态一致性（类名与样式、冒烟选择器）
 pnpm check:bundle   # 构建 + 扫产物里的 node: 引用 + PWA 外壳检查
