@@ -930,3 +930,103 @@ button {
 .bad {
   color: var(--danger);
 }
+
+/* ==================== 分组视图 ==================== */
+
+.row-group {
+  cursor: pointer;
+  background: var(--panel-2);
+  border-radius: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.row-group:hover {
+  background: var(--panel-3);
+}
+
+.group-caret {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.group-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.group-count {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* ==================== 行内动作 ==================== */
+
+.row-action {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.row:hover .row-action,
+.row-action:focus-visible {
+  opacity: 1;
+}
+
+.row-action:hover {
+  color: var(--accent);
+  background: var(--panel-3);
+}
+
+/* ==================== 进度条拖动预览 ==================== */
+
+.progress-bubble {
+  position: absolute;
+  bottom: 14px;
+  transform: translateX(-50%);
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--panel-3);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.progress-bubble[data-visible='true'] {
+  opacity: 1;
+}
+
+/* ==================== 问题文件小结 ==================== */
+
+.diag {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.diag strong {
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}

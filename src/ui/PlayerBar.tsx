@@ -29,7 +29,13 @@ function ModeIcon({ mode }: { mode: keyof typeof MODE_TEXT }) {
   return <span className="mode-text">顺序</span>;
 }
 
-/** 进度条：rAF 直接改 DOM，不参与 React 渲染。 */
+/**
+ * 进度条：rAF 直接改 DOM，不参与 React 渲染。
+ *
+ * 拖动时显示**预览时间**而不立刻跳转：指针抬起才真正 seek。
+ * 这样来回拖不会让音频反复重新定位（每次 seek 都要等解码器就绪），也符合播放器的通用手感。
+ * 预览值放在 ref 里而不是 state：拖动过程中每秒几十次更新，进 state 会带着整棵列表重渲染。
+ */
 function Progress() {
   const duration = useAppStore((state) => state.durationSec);
   const seek = useAppStore((state) => state.seek);
@@ -37,29 +43,45 @@ function Progress() {
   const fillRef = useRef<HTMLDivElement>(null);
   const positionRef = useRef<HTMLSpanElement>(null);
   const durationRef = useRef<HTMLSpanElement>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  /** 拖动中的预览进度；null 表示没在拖。 */
+  const previewRef = useRef<number | null>(null);
 
   useEffect(() => {
     let frame = 0;
     const tick = (): void => {
       const live = readLiveProgress();
       const total = live.durationSec || duration;
-      if (fillRef.current) {
-        fillRef.current.style.width = total > 0 ? `${(live.positionSec / total) * 100}%` : '0%';
-      }
-      if (positionRef.current) positionRef.current.textContent = formatTime(live.positionSec);
+      const preview = previewRef.current;
+      const shown = preview ?? live.positionSec;
+      const ratio = total > 0 ? Math.min(1, shown / total) : 0;
+
+      if (fillRef.current) fillRef.current.style.width = `${ratio * 100}%`;
+      if (positionRef.current) positionRef.current.textContent = formatTime(shown);
       if (durationRef.current) durationRef.current.textContent = total > 0 ? formatTime(total) : '--:--';
+      if (bubbleRef.current) {
+        bubbleRef.current.textContent = formatTime(shown);
+        bubbleRef.current.style.left = `${ratio * 100}%`;
+        bubbleRef.current.dataset.visible = preview === null ? 'false' : 'true';
+      }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
   }, [duration]);
 
-  const seekFromEvent = (clientX: number, element: HTMLElement): void => {
+  const previewFromEvent = (clientX: number, element: HTMLElement): void => {
     const rect = element.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     const live = readLiveProgress();
     const total = live.durationSec || duration;
-    if (total > 0) seek(ratio * total);
+    if (total > 0) previewRef.current = ratio * total;
+  };
+
+  const commit = (): void => {
+    const preview = previewRef.current;
+    previewRef.current = null;
+    if (preview !== null) seek(preview);
   };
 
   return (
@@ -72,13 +94,16 @@ function Progress() {
         onPointerDown={(event) => {
           const bar = event.currentTarget;
           bar.setPointerCapture(event.pointerId);
-          seekFromEvent(event.clientX, bar);
+          previewFromEvent(event.clientX, bar);
         }}
         onPointerMove={(event) => {
-          if (event.buttons === 1) seekFromEvent(event.clientX, event.currentTarget);
+          if (event.buttons === 1) previewFromEvent(event.clientX, event.currentTarget);
         }}
+        onPointerUp={commit}
+        onPointerCancel={commit}
       >
         <div className="progress-fill" ref={fillRef} />
+        <div className="progress-bubble" ref={bubbleRef} data-visible="false" />
       </div>
       <span className="time" ref={durationRef}>
         --:--

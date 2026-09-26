@@ -5,16 +5,20 @@
  * 而不是优化项：只渲染视口内的行（外加少量缓冲）。这里手写了一个最小的窗口化实现
  * （固定行高，几十行代码），避免为单一场景引入依赖。
  *
+ * 分组视图也用同一套窗口化：`visibleEntries()` 已经把分组头与曲目摊平成**混合行**，
+ * 分组头只是样式不同的普通一行，所以固定行高依然成立——不必引入可变行高的虚拟化库。
+ *
  * 另外两条纪律也体现在这里：
  *  - 封面按需从 IndexedDB 读，滚出视口 / 组件卸载时释放引用（配合 `coverCache` 的 LRU）
  *  - 行内容不订阅播放进度，进度由 `PlayerBar` 用 rAF 直接改 DOM
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatTime } from '../core/format.js';
+import type { ListEntry } from '../core/sort.js';
 import type { Track } from '../core/track.js';
 import { useAppStore } from './store.js';
 import { getServices } from './services.js';
-import { MusicIcon, WarnIcon } from './Icons.js';
+import { MusicIcon, NextIcon, WarnIcon } from './Icons.js';
 
 const ROW_HEIGHT = 52;
 /** 视口上下各多渲染几行，滚动时不会出现空白。 */
@@ -73,17 +77,22 @@ function CoverThumb({ track }: { track: Track }) {
 }
 
 interface TrackTableProps {
-  tracks: Track[];
+  entries: Array<ListEntry<Track>>;
+  /** 队列顺序 = 屏幕上看到的曲目顺序（分组视图下与排序结果不同）。 */
+  queuePaths: string[];
 }
 
-export function TrackTable({ tracks }: TrackTableProps) {
+export function TrackTable({ entries, queuePaths }: TrackTableProps) {
   const selectedPath = useAppStore((state) => state.selectedPath);
   const currentPath = useAppStore((state) => state.queue[state.currentIndex]);
   const sortKey = useAppStore((state) => state.sortKey);
   const sortDirection = useAppStore((state) => state.sortDirection);
+  const collapsedGroups = useAppStore((state) => state.collapsedGroups);
   const setSort = useAppStore((state) => state.setSort);
   const select = useAppStore((state) => state.select);
   const playAt = useAppStore((state) => state.playAt);
+  const playNext = useAppStore((state) => state.playNext);
+  const toggleGroup = useAppStore((state) => state.toggleGroup);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -98,13 +107,29 @@ export function TrackTable({ tracks }: TrackTableProps) {
     return () => observer.disconnect();
   }, []);
 
-  // 队列 = 当前可见列表：双击哪首，就从那首顺着当前视图顺序往下放
-  const paths = useMemo(() => tracks.map((track) => track.path), [tracks]);
+  // 每首曲目在队列里的下标（混合行里有分组头，不能直接用行号）
+  const queueIndexOf = useMemo(() => {
+    const map = new Map<string, number>();
+    queuePaths.forEach((path, index) => map.set(path, index));
+    return map;
+  }, [queuePaths]);
 
-  const total = tracks.length;
+  // 曲目在整个列表里的序号（用于"#"列），与分组头无关
+  const ordinalOf = useMemo(() => {
+    const map = new Map<string, number>();
+    let ordinal = 0;
+    for (const entry of entries) {
+      if (entry.kind !== 'track') continue;
+      ordinal += 1;
+      map.set(entry.track.path, ordinal);
+    }
+    return map;
+  }, [entries]);
+
+  const total = entries.length;
   const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const end = Math.min(total, Math.ceil((scrollTop + viewport) / ROW_HEIGHT) + OVERSCAN);
-  const visible = tracks.slice(start, end);
+  const visible = entries.slice(start, end);
 
   const sortMark = (key: typeof sortKey): string =>
     sortKey === key ? (sortDirection === 'asc' ? ' ↑' : ' ↓') : '';
@@ -134,23 +159,45 @@ export function TrackTable({ tracks }: TrackTableProps) {
       >
         <div className="table-spacer" style={{ height: total * ROW_HEIGHT }}>
           <div style={{ transform: `translateY(${start * ROW_HEIGHT}px)` }}>
-            {visible.map((track, offset) => {
-              const index = start + offset;
+            {visible.map((entry, offset) => {
+              const key = entry.kind === 'header' ? `h:${entry.groupKey}` : `t:${entry.track.path}`;
+
+              if (entry.kind === 'header') {
+                const collapsed = collapsedGroups.includes(entry.groupKey);
+                return (
+                  <div
+                    key={key}
+                    className="row row-group"
+                    style={{ height: ROW_HEIGHT }}
+                    onClick={() => toggleGroup(entry.groupKey)}
+                    role="button"
+                    tabIndex={-1}
+                    title={collapsed ? '点击展开' : '点击收起'}
+                  >
+                    <span className="col-index group-caret">{collapsed ? '▸' : '▾'}</span>
+                    <span className="col-title group-title">{entry.groupKey}</span>
+                    <span className="col-artist group-count">{entry.count} 首</span>
+                  </div>
+                );
+              }
+
+              const track = entry.track;
+              const index = queueIndexOf.get(track.path) ?? start + offset;
               const playing = track.path === currentPath;
               const active = track.path === selectedPath;
               const unsupported = track.verdict !== 'decodable';
 
               return (
                 <div
-                  key={track.path}
+                  key={key}
                   className={`row${active ? ' row-active' : ''}${playing ? ' row-playing' : ''}`}
                   style={{ height: ROW_HEIGHT }}
                   onClick={() => select(track.path)}
-                  onDoubleClick={() => void playAt(paths, index)}
+                  onDoubleClick={() => void playAt(queuePaths, index)}
                   title={unsupported ? track.verdictNote : track.path}
                 >
                   <span className="col-index">
-                    {playing ? <span className="playing-bars" aria-label="正在播放" /> : index + 1}
+                    {playing ? <span className="playing-bars" aria-label="正在播放" /> : ordinalOf.get(track.path) ?? ''}
                   </span>
                   <span className="col-title">
                     <CoverThumb track={track} />
@@ -170,6 +217,16 @@ export function TrackTable({ tracks }: TrackTableProps) {
                       </span>
                       {track.lossless && <span className="sub">无损</span>}
                     </span>
+                    <button
+                      className="row-action"
+                      title="下一首播放"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        playNext(track.path);
+                      }}
+                    >
+                      <NextIcon size={14} />
+                    </button>
                   </span>
                   <span className="col-artist">{track.artist ?? '—'}</span>
                   <span className="col-album">{track.album ?? '—'}</span>

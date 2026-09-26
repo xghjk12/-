@@ -292,6 +292,9 @@ function installTestHooks(): void {
         queueOpen: state.queueOpen,
         resumePath: state.resumePath,
         resumePositionSec: state.resumePositionSec,
+        recentPaths: state.recentPaths,
+        collapsedGroups: state.collapsedGroups,
+        view: state.view,
         ready: state.ready,
         persistent: state.persistent,
       };

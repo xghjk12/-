@@ -231,3 +231,41 @@ export function removeQueueItem<T>(
     removedCurrent: false,
   };
 }
+
+export interface QueueInsertion<T> {
+  queue: T[];
+  currentIndex: number;
+}
+
+/**
+ * 把一项插到当前曲目之后（「下一首播放」），已经在队列里就先摘掉再插。
+ *
+ * 与 `removeQueueItem` 是同一类容易写错的下标账：
+ *  - 原本在当前曲目**之前**的项被摘掉时，当前下标要减 1，否则会跳到别的曲目
+ *  - 插到当前项之后不会影响当前下标
+ *  - 没有当前曲目（-1）时插到队尾
+ */
+export function insertAfterCurrent<T>(
+  queue: readonly T[],
+  currentIndex: number,
+  item: T,
+): QueueInsertion<T> {
+  const existing = queue.indexOf(item);
+
+  // 插的就是当前正在放的那首：插到"自己后面"等于挪到下一首的位置，会莫名跳歌。
+  // 对用户来说这也是空操作（它已经在放了）。
+  if (existing !== -1 && existing === currentIndex) {
+    return { queue: [...queue], currentIndex };
+  }
+
+  const without = queue.filter((entry) => entry !== item);
+
+  let index = currentIndex;
+  if (existing !== -1 && existing < currentIndex) index -= 1;
+
+  const insertAt = index < 0 ? without.length : index + 1;
+  return {
+    queue: [...without.slice(0, insertAt), item, ...without.slice(insertAt)],
+    currentIndex: index,
+  };
+}

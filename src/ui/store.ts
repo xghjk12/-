@@ -11,9 +11,10 @@
  * 它们不是可序列化状态，重建它们等于把正在放的歌打断。
  */
 import { create } from 'zustand';
-import { isValidMode, nextMode, removeQueueItem } from '../core/queue.js';
+import { insertAfterCurrent, isValidMode, nextMode, removeQueueItem } from '../core/queue.js';
 import type { PlayMode } from '../core/queue.js';
-import { filterTracks, buildSearchKey, sortTracks } from '../core/sort.js';
+import { filterTracks, buildSearchKey, buildGroupedEntries, sortTracks, tracksToEntries } from '../core/sort.js';
+import type { ListEntry } from '../core/sort.js';
 import type { SortDirection, Track, TrackSortKey } from '../core/track.js';
 import { createAudioEngine } from '../platform/audioEngine.js';
 import type { AudioEngine } from '../platform/audioEngine.js';
@@ -39,8 +40,11 @@ import type { PlaybackController, PlaybackSnapshot } from './playback.js';
 import { getServices } from './services.js';
 import type { Services } from './services.js';
 
-export type LibraryView = 'all' | 'recent' | 'unsupported';
+export type LibraryView = 'all' | 'artist' | 'album' | 'recent' | 'played' | 'diagnostics';
 export type NoticeKind = 'info' | 'warn' | 'error';
+
+/** 播放历史的条数上限：够用又不会把状态记录撑大。 */
+export const RECENT_LIMIT = 200;
 
 export interface Notice {
   id: number;
@@ -126,6 +130,10 @@ export interface AppState {
   sortDirection: SortDirection;
   view: LibraryView;
   selectedPath?: string;
+  /** 分组视图里被收起的分组键（艺术家名或专辑名）。 */
+  collapsedGroups: string[];
+  /** 最近播放过的曲目身份，最新在前。 */
+  recentPaths: string[];
 
   queue: string[];
   currentIndex: number;
@@ -156,6 +164,10 @@ export interface AppActions {
   setSort(key: TrackSortKey): void;
   setView(view: LibraryView): void;
   select(path: string | undefined): void;
+  /** 收起/展开分组视图里的某个分组。 */
+  toggleGroup(groupKey: string): void;
+  /** 把某首插到当前曲目之后（"下一首播放"）。 */
+  playNext(path: string): void;
 
   playAt(paths: string[], index: number): Promise<void>;
   togglePlay(): Promise<void>;
@@ -206,6 +218,8 @@ const INITIAL: AppState = {
   sortDirection: 'asc',
   view: 'all',
   selectedPath: undefined,
+  collapsedGroups: [],
+  recentPaths: [],
   queue: [],
   currentIndex: -1,
   mode: 'sequence',
@@ -227,21 +241,86 @@ export interface VisibleOptions {
   sortKey: TrackSortKey;
   sortDirection: SortDirection;
   view: LibraryView;
+  /** 最近播放顺序（view='played' 时用）。 */
+  recentPaths?: readonly string[];
+  /** 收起的分组（view='artist' | 'album' 时用）。 */
+  collapsedGroups?: readonly string[];
 }
 
-/** 视图 → 检索 → 排序。`sortKey` 为 default 时保留视图自带顺序。 */
-export function visibleTracks(tracks: Track[], options: VisibleOptions): Track[] {
+/**
+ * 视图 → 检索 → 排序 → （必要时分组摊平）→ 混合行列表。
+ *
+ * 返回混合行而不是曲目数组，是因为**队列必须等于屏幕上看到的顺序**：
+ * 分组视图下顺序会被分组打乱，所以播放队列由这个列表里的 track 行依次取出，
+ * 而不是另外拿一份排序结果——两份顺序一旦不同，就会出现"双击这首却放了另一首"。
+ */
+export function visibleEntries(tracks: Track[], options: VisibleOptions): Array<ListEntry<Track>> {
   let list = tracks;
 
-  if (options.view === 'unsupported') {
-    list = list.filter((track) => track.verdict !== 'decodable');
+  if (options.view === 'diagnostics') {
+    list = list.filter((track) => diagnoseTrack(track) !== undefined);
   } else if (options.view === 'recent') {
+    // 「最近添加」按入库时间倒序，最多 200 首
     list = [...list].sort((a, b) => b.addedAt - a.addedAt).slice(0, 200);
+  } else if (options.view === 'played') {
+    const order = new Map((options.recentPaths ?? []).map((path, index) => [path, index]));
+    list = [...list]
+      .filter((track) => order.has(track.path))
+      .sort((a, b) => (order.get(a.path) ?? 0) - (order.get(b.path) ?? 0));
   }
 
   const filtered = filterTracks(list, options.query);
-  if (options.sortKey === 'default') return filtered;
-  return sortTracks(filtered, options.sortKey, options.sortDirection);
+  const sorted =
+    options.sortKey === 'default' ? filtered : sortTracks(filtered, options.sortKey, options.sortDirection);
+
+  if (options.view === 'artist' || options.view === 'album') {
+    return buildGroupedEntries(sorted, options.view, options.collapsedGroups ?? []);
+  }
+  return tracksToEntries(sorted);
+}
+
+/** 混合行列表 → 曲目顺序（播放队列就用它）。 */
+export function entryTracks(entries: Array<ListEntry<Track>>): Track[] {
+  return entries.filter((entry): entry is { kind: 'track'; track: Track } => entry.kind === 'track').map((entry) => entry.track);
+}
+
+export type DiagnosticCode = 'unsupported' | 'parse-error';
+
+export interface Diagnosis {
+  code: DiagnosticCode;
+  reason: string;
+}
+
+/**
+ * 判断一首曲目是否需要人工关注，并给出可读原因。
+ *
+ * 诊段视图不去"猜"太多：只列**能说清原因**的两类——格式浏览器放不出声、标签解析失败。
+ * 这样用户看到清单就知道要么换格式要么修标签，而不是面对一堆模棱两可的警告。
+ */
+export function diagnoseTrack(track: Track): Diagnosis | undefined {
+  if (track.parseError) {
+    return { code: 'parse-error', reason: `标签读取失败：${track.parseError}` };
+  }
+  if (track.verdict !== 'decodable') {
+    return { code: 'unsupported', reason: track.verdictNote ?? '浏览器无法解码该格式' };
+  }
+  return undefined;
+}
+
+/** 侧栏每个视图的计数。 */
+export function viewCounts(
+  tracks: Track[],
+  recentPaths: readonly string[] = [],
+): Record<LibraryView, number> {
+  const playableKnown = new Set(tracks.map((track) => track.path));
+  return {
+    all: tracks.length,
+    artist: new Set(tracks.map((track) => track.artist?.trim() || '未知')).size,
+    album: new Set(tracks.map((track) => track.album?.trim() || '未知')).size,
+    recent: Math.min(tracks.length, 200),
+    played: recentPaths.filter((path) => playableKnown.has(path)).length,
+    diagnostics: tracks.filter((track) => diagnoseTrack(track) !== undefined).length,
+  };
 }
 
 export function libraryStats(tracks: Track[]): {
@@ -290,6 +369,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       mode: state.mode,
       trackPath: state.resumePath,
       positionSec,
+      recentPaths: state.recentPaths,
       updatedAt: Date.now(),
     };
   }
@@ -312,10 +392,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
     livePositionSec = positionSec;
     releaseArtwork();
 
+    // 记一次播放历史：最新在前、去重、限量
+    const recentPaths = track
+      ? [track.path, ...get().recentPaths.filter((path) => path !== track.path)].slice(0, RECENT_LIMIT)
+      : get().recentPaths;
+
     set({
       resumePath: track?.path,
       resumePositionSec: positionSec,
       durationSec: 0,
+      recentPaths,
       ...(track ? { selectedPath: track.path } : {}),
     });
 
@@ -532,8 +618,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     async boot() {
       if (get().ready) return;
-      if (booting) return booting;
-      booting = (async () => {
+      // booting 只用来合并"同一时刻的并发调用"；完成后必须清掉，
+      // 否则「清空曲库」之后或测试里重置状态之后再调 boot 会拿到一个已经过期的 promise，
+      // 于是什么都不做、界面永远停在未就绪。
+      booting ??= (async () => {
         services = await getServices();
         const [saved, cached, handle] = await Promise.all([
           services.storage.readState(),
@@ -571,6 +659,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           mode: saved?.mode && isValidMode(saved.mode) ? saved.mode : 'sequence',
           resumePath: saved?.trackPath,
           resumePositionSec: saved?.positionSec ?? 0,
+          recentPaths: saved?.recentPaths ?? [],
           canRestore: Boolean(handle),
         });
 
@@ -595,7 +684,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
             controller?.seek((engine?.positionSec ?? 0) + offset),
         });
       })();
-      return booting;
+
+      try {
+        await booting;
+      } finally {
+        booting = undefined;
+      }
     },
 
     async pickDirectory() {
@@ -689,6 +783,30 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     select(path) {
       set({ selectedPath: path });
+    },
+
+    toggleGroup(groupKey) {
+      const collapsed = get().collapsedGroups;
+      set({
+        collapsedGroups: collapsed.includes(groupKey)
+          ? collapsed.filter((key) => key !== groupKey)
+          : [...collapsed, groupKey],
+      });
+    },
+
+    playNext(path) {
+      const { queue, currentIndex, tracks } = get();
+      const title = tracks.find((track) => track.path === path)?.title ?? path;
+
+      // 队列还是空的：直接当"从这首开始播"，否则用户会以为按钮没反应
+      if (queue.length === 0) {
+        void get().playAt([path], 0);
+        return;
+      }
+
+      const result = insertAfterCurrent(queue, currentIndex, path);
+      set({ queue: result.queue, currentIndex: result.currentIndex });
+      pushNotice(`下一首播放：${title}`);
     },
 
     async playAt(paths, index) {

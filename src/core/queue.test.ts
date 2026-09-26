@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AdvanceInput, PlayMode } from './queue.js';
 import {
   findPlayableIndex,
+  insertAfterCurrent,
   isValidMode,
   MODE_LABEL,
   MODES,
@@ -342,5 +343,48 @@ describe('removeQueueItem：移除队列项时的下标修正', () => {
     const empty = removeQueueItem([], 0, 0);
     expect(empty.queue).toEqual([]);
     expect(empty.removedCurrent).toBe(false);
+  });
+});
+
+describe('insertAfterCurrent：下一首播放', () => {
+  const QUEUE = ['a', 'b', 'c'];
+
+  it('插到当前曲目之后', () => {
+    const result = insertAfterCurrent(QUEUE, 1, 'x');
+    expect(result.queue).toEqual(['a', 'b', 'x', 'c']);
+    expect(result.currentIndex).toBe(1);
+    expect(result.queue[result.currentIndex]).toBe('b');
+  });
+
+  it('已经在队列里时先摘掉再插，且当前下标仍然指向同一首歌', () => {
+    // 把队首的 a 挪到 b 之后
+    const result = insertAfterCurrent(QUEUE, 1, 'a');
+    expect(result.queue).toEqual(['b', 'a', 'c']);
+    expect(result.queue[result.currentIndex]).toBe('b');
+  });
+
+  it('摘掉的项在当前曲目之前时，下标要减 1', () => {
+    // 当前是 c（下标 2），把 a 挪到 c 之后 → a 被摘掉后 c 的下标变成 1
+    const result = insertAfterCurrent(QUEUE, 2, 'a');
+    expect(result.queue).toEqual(['b', 'c', 'a']);
+    expect(result.currentIndex).toBe(1);
+    expect(result.queue[result.currentIndex]).toBe('c');
+  });
+
+  it('没有当前曲目时插到队尾', () => {
+    expect(insertAfterCurrent(QUEUE, -1, 'x').queue).toEqual(['a', 'b', 'c', 'x']);
+    expect(insertAfterCurrent([], -1, 'x').queue).toEqual(['x']);
+  });
+
+  it('插的是当前曲目自己时，位置不变', () => {
+    const result = insertAfterCurrent(QUEUE, 1, 'b');
+    expect(result.queue).toEqual(['a', 'b', 'c']);
+    expect(result.currentIndex).toBe(1);
+  });
+
+  it('不改动入参', () => {
+    const original = [...QUEUE];
+    insertAfterCurrent(QUEUE, 0, 'x');
+    expect(QUEUE).toEqual(original);
   });
 });

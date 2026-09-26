@@ -169,3 +169,38 @@ export function groupBy<T extends SortableTrack>(
     .sort(compareText)
     .map((name) => ({ key: name, tracks: buckets.get(name)! }));
 }
+
+/** 分组视图里的一行：要么是分组头，要么是曲目。 */
+export type ListEntry<T> =
+  | { kind: 'header'; groupKey: string; count: number }
+  | { kind: 'track'; track: T };
+
+/**
+ * 把分组结果摊平成「混合行」列表：分组头与曲目在同一个数组里。
+ *
+ * 这样虚拟化可以继续用**固定行高**——不必为了分组头去引入可变行高的虚拟化库
+ * （技术方案 7.1 留的那个抉择点）；分组头只是样式不同的普通一行。
+ *
+ * @param collapsed 已收起的分组键；收起的分组只保留分组头
+ */
+export function buildGroupedEntries<T extends SortableTrack>(
+  tracks: readonly T[],
+  key: 'artist' | 'album',
+  collapsed: readonly string[] = [],
+): Array<ListEntry<T>> {
+  const collapsedSet = new Set(collapsed);
+  const entries: Array<ListEntry<T>> = [];
+
+  for (const group of groupBy(tracks, key)) {
+    entries.push({ kind: 'header', groupKey: group.key, count: group.tracks.length });
+    if (collapsedSet.has(group.key)) continue;
+    for (const track of group.tracks) entries.push({ kind: 'track', track });
+  }
+
+  return entries;
+}
+
+/** 曲目列表 → 混合行（没有分组时每首一行），让界面只有一条渲染路径。 */
+export function tracksToEntries<T extends SortableTrack>(tracks: readonly T[]): Array<ListEntry<T>> {
+  return tracks.map((track) => ({ kind: 'track' as const, track }));
+}

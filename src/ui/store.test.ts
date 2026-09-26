@@ -1,9 +1,9 @@
 /**
  * store 的单测（jsdom）。
  *
- * `src/ui/store.ts` 是最大的编排文件，之前只被界面冒烟间接覆盖。这里把能在 Node 里
- * 确定性验证的部分补上：视图/检索/排序的组合、曲库统计、队列下标修正、音量与静音的联动、
- * 播放模式循环、提示的进出，以及"IndexedDB 不可用时降级为内存存储"这条启动路径。
+ * `src/ui/store.ts` 是最大的编排文件，这里把能在 Node 里确定性验证的部分补上：
+ * 视图/检索/排序的组合、分组摊平与收起、播放历史、问题文件诊断、队列增删与下标修正、
+ * 音量与静音的联动、提示的进出，以及"IndexedDB 不可用时降级为内存存储"这条启动路径。
  *
  * 需要 jsdom 是因为 store 会写 `document.title`、挂 `visibilitychange` / `pagehide`；
  * jsdom 没有 IndexedDB，所以 `getServices()` 会走 `memoryStorage()` 降级——
@@ -12,13 +12,24 @@
  * @vitest-environment jsdom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ListEntry } from '../core/sort.js';
+import { buildSearchKey } from '../core/sort.js';
 import type { Track } from '../core/track.js';
 import { resetServices } from './services.js';
-import { getAudioElement, libraryStats, readLiveProgress, useAppStore, visibleTracks } from './store.js';
+import {
+  diagnoseTrack,
+  entryTracks,
+  getAudioElement,
+  libraryStats,
+  readLiveProgress,
+  useAppStore,
+  viewCounts,
+  visibleEntries,
+} from './store.js';
 import type { LibraryView } from './store.js';
 
 function track(path: string, overrides: Partial<Track> = {}): Track {
-  return {
+  const base: Track = {
     path,
     name: path.split('/').pop() ?? path,
     size: 1024,
@@ -33,9 +44,15 @@ function track(path: string, overrides: Partial<Track> = {}): Track {
     addedAt: 1000,
     ...overrides,
   };
+  return base;
 }
 
 const FILTERS = { query: '', sortKey: 'default' as const, sortDirection: 'asc' as const };
+
+/** 把混合行压成好断言的形状：分组头记作 `[键]`，曲目记作 path。 */
+function shapeOf(entries: Array<ListEntry<Track>>): string[] {
+  return entries.map((entry) => (entry.kind === 'header' ? `[${entry.groupKey}]` : entry.track.path));
+}
 
 beforeEach(() => {
   resetServices();
@@ -47,6 +64,8 @@ beforeEach(() => {
     sortDirection: 'asc',
     view: 'all',
     selectedPath: undefined,
+    collapsedGroups: [],
+    recentPaths: [],
     queue: [],
     currentIndex: -1,
     mode: 'sequence',
@@ -58,7 +77,7 @@ beforeEach(() => {
   });
 });
 
-describe('visibleTracks：视图 / 检索 / 排序', () => {
+describe('visibleEntries：视图 / 检索 / 排序', () => {
   const tracks = [
     track('a', { title: '青花瓷', artist: '周杰伦', album: '我很忙', durationSec: 200, addedAt: 300 }),
     track('b', { title: 'Duvet', artist: 'bôa', album: 'Twilight', durationSec: 203, addedAt: 100 }),
@@ -67,57 +86,160 @@ describe('visibleTracks：视图 / 检索 / 排序', () => {
   ];
 
   it('all 视图返回全部，且 sortKey=default 时保留原顺序', () => {
-    const result = visibleTracks(tracks, { ...FILTERS, view: 'all' });
-    expect(result.map((item) => item.path)).toEqual(['a', 'b', 'c', 'd']);
-  });
-
-  it('unsupported 视图只留不可播放的曲目', () => {
-    const result = visibleTracks(tracks, { ...FILTERS, view: 'unsupported' });
-    expect(result.map((item) => item.path)).toEqual(['d']);
+    expect(shapeOf(visibleEntries(tracks, { ...FILTERS, view: 'all' }))).toEqual(['a', 'b', 'c', 'd']);
   });
 
   it('recent 视图按入库时间倒序，且 sortKey=default 时不再被标题重排', () => {
-    const result = visibleTracks(tracks, { ...FILTERS, view: 'recent' });
-    expect(result.map((item) => item.path)).toEqual(['d', 'a', 'c', 'b']);
+    expect(shapeOf(visibleEntries(tracks, { ...FILTERS, view: 'recent' }))).toEqual([
+      'd',
+      'a',
+      'c',
+      'b',
+    ]);
+  });
+
+  it('played 视图按播放历史倒序，且只保留在库的曲目', () => {
+    const entries = visibleEntries(tracks, {
+      ...FILTERS,
+      view: 'played',
+      recentPaths: ['c', '已删除的', 'a'],
+    });
+    expect(shapeOf(entries)).toEqual(['c', 'a']);
+  });
+
+  it('diagnostics 视图只留需要留意的文件', () => {
+    const withError = [...tracks, track('e', { parseError: 'Failed to determine' })];
+    expect(shapeOf(visibleEntries(withError, { ...FILTERS, view: 'diagnostics' }))).toEqual([
+      'd',
+      'e',
+    ]);
+  });
+
+  it('artist / album 视图摊平成混合行，分组头在曲目之前', () => {
+    const entries = visibleEntries(tracks, { ...FILTERS, view: 'artist' });
+    // 分组顺序由中文 collator 决定：汉字按拼音在前（未 w < 周 z），拉丁字母在后
+    expect(shapeOf(entries)).toEqual([
+      '[未知]',
+      'd',
+      '[周杰伦]',
+      'a',
+      'c',
+      '[bôa]',
+      'b',
+    ]);
+  });
+
+  it('收起的艺术家的曲目不再出现，但分组头保留', () => {
+    const entries = visibleEntries(tracks, {
+      ...FILTERS,
+      view: 'artist',
+      collapsedGroups: ['周杰伦'],
+    });
+    expect(shapeOf(entries)).toEqual(['[未知]', 'd', '[周杰伦]', '[bôa]', 'b']);
+  });
+
+  it('分组视图里也能检索', () => {
+    const entries = visibleEntries(tracks, { ...FILTERS, view: 'album', query: '周杰伦' });
+    expect(shapeOf(entries)).toEqual(['[我很忙]', 'a', 'c']);
+  });
+
+  it('entryTracks 给出队列顺序（跳过分组头）', () => {
+    const entries = visibleEntries(tracks, { ...FILTERS, view: 'artist' });
+    expect(entryTracks(entries).map((item) => item.path)).toEqual(['d', 'a', 'c', 'b']);
   });
 
   it('检索命中标题 / 艺术家 / 专辑，且忽略大小写与拉丁变音符号', () => {
-    const byTitle = visibleTracks(tracks, { ...FILTERS, view: 'all', query: '青花' });
-    expect(byTitle.map((item) => item.path)).toEqual(['a']);
+    const byTitle = visibleEntries(tracks, { ...FILTERS, view: 'all', query: '青花' });
+    expect(shapeOf(byTitle)).toEqual(['a']);
 
     // 'bôa' 用普通字母 boa 也要搜得到（工作区里就有 bôa - Duvet.flac）
-    const byArtist = visibleTracks(tracks, { ...FILTERS, view: 'all', query: 'BOA' });
-    expect(byArtist.map((item) => item.path)).toEqual(['b']);
+    const byArtist = visibleEntries(tracks, { ...FILTERS, view: 'all', query: 'BOA' });
+    expect(shapeOf(byArtist)).toEqual(['b']);
 
-    const withDiacritics = visibleTracks(tracks, { ...FILTERS, view: 'all', query: 'bôa' });
-    expect(withDiacritics.map((item) => item.path)).toEqual(['b']);
+    const byAlbum = visibleEntries(tracks, { ...FILTERS, view: 'all', query: '我很忙' });
+    expect(shapeOf(byAlbum)).toEqual(['a', 'c']);
+  });
 
-    const byAlbum = visibleTracks(tracks, { ...FILTERS, view: 'all', query: '我很忙' });
-    expect(byAlbum.map((item) => item.path)).toEqual(['a', 'c']);
+  it('拼音首字母也能检索（zjl / qhc）', () => {
+    expect(shapeOf(visibleEntries(tracks, { ...FILTERS, view: 'all', query: 'zjl' }))).toEqual([
+      'a',
+      'c',
+    ]);
+    expect(shapeOf(visibleEntries(tracks, { ...FILTERS, view: 'all', query: 'qhc' }))).toEqual(['a']);
   });
 
   it('检索与视图叠加生效', () => {
-    const result = visibleTracks(tracks, { ...FILTERS, view: 'unsupported', query: '周杰伦' });
-    expect(result).toEqual([]);
+    expect(visibleEntries(tracks, { ...FILTERS, view: 'diagnostics', query: '周杰伦' })).toEqual([]);
   });
 
   it('按标题升序用中文 collator（第10首 排在 第2首 之后）', () => {
-    const list = [
-      track('x', { title: '第10首' }),
-      track('y', { title: '第2首' }),
-      track('z', { title: '第1首' }),
-    ];
-    const asc = visibleTracks(list, { ...FILTERS, view: 'all', sortKey: 'title' });
-    expect(asc.map((item) => item.title)).toEqual(['第1首', '第2首', '第10首']);
+    const list = [track('x', { title: '第10首' }), track('y', { title: '第2首' }), track('z', { title: '第1首' })];
+    const asc = visibleEntries(list, { ...FILTERS, view: 'all', sortKey: 'title' });
+    expect(entryTracks(asc).map((item) => item.title)).toEqual(['第1首', '第2首', '第10首']);
 
-    const desc = visibleTracks(list, { ...FILTERS, view: 'all', sortKey: 'title', sortDirection: 'desc' });
-    expect(desc.map((item) => item.title)).toEqual(['第10首', '第2首', '第1首']);
+    const desc = visibleEntries(list, {
+      ...FILTERS,
+      view: 'all',
+      sortKey: 'title',
+      sortDirection: 'desc',
+    });
+    expect(entryTracks(desc).map((item) => item.title)).toEqual(['第10首', '第2首', '第1首']);
   });
 
   it('按时长排序走数值比较', () => {
-    const result = visibleTracks(tracks, { ...FILTERS, view: 'all', sortKey: 'duration' });
+    const result = visibleEntries(tracks, { ...FILTERS, view: 'all', sortKey: 'duration' });
     // d 没有覆盖 durationSec，用的是工厂默认值 200
-    expect(result.map((item) => item.durationSec)).toEqual([100, 200, 200, 203]);
+    expect(entryTracks(result).map((item) => item.durationSec)).toEqual([100, 200, 200, 203]);
+  });
+});
+
+describe('diagnoseTrack', () => {
+  it('正常曲目没有诊断结果', () => {
+    expect(diagnoseTrack(track('a'))).toBeUndefined();
+  });
+
+  it('格式放不出声 → unsupported，并带上说明', () => {
+    const diagnosis = diagnoseTrack(track('a.ape', { verdict: 'metadata-only', verdictNote: '浏览器无法解码该格式' }));
+    expect(diagnosis).toEqual({ code: 'unsupported', reason: '浏览器无法解码该格式' });
+  });
+
+  it('解析失败优先于格式判定', () => {
+    const diagnosis = diagnoseTrack(
+      track('a.ape', { verdict: 'metadata-only', parseError: 'EndOfStreamError' }),
+    );
+    expect(diagnosis?.code).toBe('parse-error');
+    expect(diagnosis?.reason).toContain('EndOfStreamError');
+  });
+});
+
+describe('viewCounts', () => {
+  it('艺术家/专辑给的是分组数，播放历史只算在库的', () => {
+    const tracks = [
+      track('a', { artist: '周杰伦', album: '我很忙' }),
+      track('b', { artist: '周杰伦', album: '我很忙' }),
+      track('c', { artist: 'bôa', album: 'Twilight' }),
+      track('d', { verdict: 'metadata-only', artist: undefined, album: undefined }),
+    ];
+
+    expect(viewCounts(tracks, ['a', 'b', '已删除'])).toEqual({
+      all: 4,
+      artist: 3, // 周杰伦 / bôa / 未知
+      album: 3,
+      recent: 4,
+      played: 2,
+      diagnostics: 1,
+    });
+  });
+
+  it('空曲库全为 0', () => {
+    expect(viewCounts([], [])).toEqual({
+      all: 0,
+      artist: 0,
+      album: 0,
+      recent: 0,
+      played: 0,
+      diagnostics: 0,
+    });
   });
 });
 
@@ -131,23 +253,11 @@ describe('libraryStats', () => {
       track('d', { verdict: 'metadata-only', durationSec: undefined }),
     ]);
 
-    expect(stats).toEqual({
-      total: 4,
-      durationSec: 350,
-      artists: 2,
-      albums: 2,
-      unsupported: 1,
-    });
+    expect(stats).toEqual({ total: 4, durationSec: 350, artists: 2, albums: 2, unsupported: 1 });
   });
 
   it('空曲库与缺字段都不炸', () => {
-    expect(libraryStats([])).toEqual({
-      total: 0,
-      durationSec: 0,
-      artists: 0,
-      albums: 0,
-      unsupported: 0,
-    });
+    expect(libraryStats([])).toEqual({ total: 0, durationSec: 0, artists: 0, albums: 0, unsupported: 0 });
 
     const stats = libraryStats([track('a', { artist: undefined, album: undefined, durationSec: undefined })]);
     expect(stats).toMatchObject({ total: 1, durationSec: 0, artists: 0, albums: 0 });
@@ -178,14 +288,25 @@ describe('store：视图与检索动作', () => {
   it('setQuery / setView / select 直接落到状态上', () => {
     const store = useAppStore.getState();
     store.setQuery('青花');
-    store.setView('unsupported' as LibraryView);
+    store.setView('diagnostics' as LibraryView);
     store.select('专辑/a.flac');
 
     expect(useAppStore.getState()).toMatchObject({
       query: '青花',
-      view: 'unsupported',
+      view: 'diagnostics',
       selectedPath: '专辑/a.flac',
     });
+  });
+
+  it('toggleGroup 收起再展开', () => {
+    useAppStore.getState().toggleGroup('周杰伦');
+    expect(useAppStore.getState().collapsedGroups).toEqual(['周杰伦']);
+
+    useAppStore.getState().toggleGroup('bôa');
+    expect(useAppStore.getState().collapsedGroups).toEqual(['周杰伦', 'bôa']);
+
+    useAppStore.getState().toggleGroup('周杰伦');
+    expect(useAppStore.getState().collapsedGroups).toEqual(['bôa']);
   });
 });
 
@@ -215,7 +336,7 @@ describe('store：音量与静音', () => {
   });
 });
 
-describe('store：播放模式', () => {
+describe('store：播放模式与队列抽屉', () => {
   it('cycleMode 依次循环四种模式并回到起点', () => {
     const seen: string[] = [];
     for (let i = 0; i < 4; i += 1) {
@@ -233,7 +354,7 @@ describe('store：播放模式', () => {
   });
 });
 
-describe('store：队列增删', () => {
+describe('store：队列增删与下一首播放', () => {
   const QUEUE = ['a', 'b', 'c'];
 
   it('移除当前曲目 → 下标置 -1 并停止播放', () => {
@@ -265,6 +386,48 @@ describe('store：队列增删', () => {
     useAppStore.getState().removeFromQueue(-1);
 
     expect(useAppStore.getState()).toMatchObject({ queue: QUEUE, currentIndex: 1 });
+  });
+
+  it('playNext 把曲目插到当前之后，并保持当前曲目不变', () => {
+    useAppStore.setState({
+      queue: QUEUE,
+      currentIndex: 1,
+      tracks: [track('a'), track('b'), track('c'), track('x', { title: '插队曲' })],
+    });
+    useAppStore.getState().playNext('x');
+
+    const state = useAppStore.getState();
+    expect(state.queue).toEqual(['a', 'b', 'x', 'c']);
+    expect(state.queue[state.currentIndex]).toBe('b');
+    expect(state.notices.at(-1)?.message).toContain('插队曲');
+  });
+
+  it('playNext 对已在队列里的曲目先摘掉再插，下标仍然指向原曲目', () => {
+    useAppStore.setState({ queue: QUEUE, currentIndex: 1, tracks: [track('a'), track('b'), track('c')] });
+    useAppStore.getState().playNext('a');
+
+    const state = useAppStore.getState();
+    expect(state.queue).toEqual(['b', 'a', 'c']);
+    expect(state.queue[state.currentIndex]).toBe('b');
+  });
+
+  it('队列为空时 playNext 直接开始播放这一首', async () => {
+    // 先 boot：boot 会用存储里的曲库覆盖内存列表，顺序反了的话曲目会被清空
+    await useAppStore.getState().boot();
+    useAppStore.setState({ queue: [], currentIndex: -1, tracks: [track('x')] });
+
+    useAppStore.getState().playNext('x');
+
+    // playAt 是异步的：先建队列，再去打来源。等"打不开来源"的提示出现，
+    // 说明整条链路已经走到尽头（测试环境里没有真实文件来源）
+    await vi.waitFor(() =>
+      expect(
+        useAppStore.getState().notices.some((notice) => notice.message.includes('打开失败')),
+      ).toBe(true),
+    );
+    expect(useAppStore.getState().queue).toEqual(['x']);
+    // 打不开来源时不会把下标设成一个放不出来的曲目
+    expect(useAppStore.getState().currentIndex).toBe(-1);
   });
 
   it('clearQueue 清空队列、复位下标并更新窗口标题', () => {
@@ -315,8 +478,13 @@ describe('store：启动（IndexedDB 不可用时降级）', () => {
     const state = useAppStore.getState();
     expect(state.ready).toBe(true);
     expect(state.persistent).toBe(false);
-    // 空存储 → 用默认值
-    expect(state).toMatchObject({ tracks: [], volume: 0.8, muted: false, mode: 'sequence' });
+    expect(state).toMatchObject({
+      tracks: [],
+      volume: 0.8,
+      muted: false,
+      mode: 'sequence',
+      recentPaths: [],
+    });
     expect(state.canRestore).toBe(false);
   });
 
@@ -334,7 +502,28 @@ describe('store：启动（IndexedDB 不可用时降级）', () => {
 
     const element = getAudioElement();
     await useAppStore.getState().boot();
-    // 引擎没有被重建
     expect(getAudioElement()).toBe(element);
+  });
+
+  it('为旧缓存补算检索键（老记录没有 searchKey 时也能用拼音搜到）', async () => {
+    // 造一条"旧版本写进去的"记录：没有 searchKey
+    const legacy = track('旧/青花瓷.flac', { title: '青花瓷', artist: '周杰伦' });
+    delete (legacy as { searchKey?: string }).searchKey;
+
+    const services = await import('./services.js').then((module) => module.getServices());
+    await services.storage.putTracks([legacy]);
+
+    await useAppStore.getState().boot();
+
+    const loaded = useAppStore.getState().tracks[0];
+    expect(loaded?.searchKey).toBe(buildSearchKey({ title: '青花瓷', artist: '周杰伦' }));
+
+    // 补算之后拼音检索立刻可用
+    const entries = visibleEntries(useAppStore.getState().tracks, {
+      ...FILTERS,
+      view: 'all',
+      query: 'qhc',
+    });
+    expect(entryTracks(entries)).toHaveLength(1);
   });
 });

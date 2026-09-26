@@ -37,6 +37,8 @@ export interface PlaybackState {
   /** 当前曲目的身份（path），不是缓存键。 */
   trackPath?: string;
   positionSec: number;
+  /** 最近播放过的曲目身份，最新在前（上限见 store 里的 RECENT_LIMIT）。 */
+  recentPaths?: string[];
   updatedAt: number;
 }
 

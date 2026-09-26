@@ -4,17 +4,23 @@
  * 「一键恢复曲库」是这里最重要的交互（产品文档 5.4 / 技术方案 11）：
  * 浏览器不给全自动加载，句柄持久化之后仍然需要一次用户点击来重新授权，
  * 所以设计成显式的「恢复曲库」按钮，而不是假装曲库还在。
+ *
+ * 视图计数由 `viewCounts()` 统一算（纯函数，有单测）：艺术家/专辑给的是**分组数**，
+ * 与列表里能看到的分组头数量一致，不是曲目数。
  */
 import { useRef } from 'react';
 import { formatDuration } from '../core/format.js';
-import { libraryStats, useAppStore } from './store.js';
+import { libraryStats, useAppStore, viewCounts } from './store.js';
 import type { LibraryView } from './store.js';
 import { FolderIcon, MusicIcon, RefreshIcon, WarnIcon } from './Icons.js';
 
-const VIEWS: Array<{ key: LibraryView; label: string }> = [
-  { key: 'all', label: '全部曲目' },
-  { key: 'recent', label: '最近添加' },
-  { key: 'unsupported', label: '不支持格式' },
+const VIEWS: Array<{ key: LibraryView; label: string; hint: string }> = [
+  { key: 'all', label: '全部曲目', hint: '平铺列表' },
+  { key: 'artist', label: '艺术家', hint: '按艺术家分组' },
+  { key: 'album', label: '专辑', hint: '按专辑分组' },
+  { key: 'recent', label: '最近添加', hint: '按入库时间倒序' },
+  { key: 'played', label: '最近播放', hint: '按播放历史倒序' },
+  { key: 'diagnostics', label: '问题文件', hint: '放不出声或读不出标签' },
 ];
 
 export function Sidebar() {
@@ -26,6 +32,7 @@ export function Sidebar() {
   const hasSource = useAppStore((state) => state.hasSource);
   const persistent = useAppStore((state) => state.persistent);
   const scanning = useAppStore((state) => state.scan.active);
+  const recentPaths = useAppStore((state) => state.recentPaths);
 
   const pickDirectory = useAppStore((state) => state.pickDirectory);
   const restoreLibrary = useAppStore((state) => state.restoreLibrary);
@@ -34,12 +41,7 @@ export function Sidebar() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const stats = libraryStats(tracks);
-
-  const counts: Record<LibraryView, number> = {
-    all: stats.total,
-    recent: Math.min(stats.total, 200),
-    unsupported: stats.unsupported,
-  };
+  const counts = viewCounts(tracks, recentPaths);
 
   return (
     <aside className="sidebar">
@@ -97,6 +99,7 @@ export function Sidebar() {
             key={item.key}
             className={`nav-item${view === item.key ? ' nav-active' : ''}`}
             onClick={() => setView(item.key)}
+            title={item.hint}
           >
             <span>{item.label}</span>
             <span className="nav-count">{counts[item.key]}</span>
@@ -112,9 +115,9 @@ export function Sidebar() {
               <br />
               共 {stats.albums} 张专辑 · {stats.artists} 位艺术家
             </p>
-            {stats.unsupported > 0 && (
+            {counts.diagnostics > 0 && (
               <p className="warn-text">
-                <WarnIcon size={13} /> {stats.unsupported} 首格式不受支持
+                <WarnIcon size={13} /> {counts.diagnostics} 首需要留意
               </p>
             )}
           </>

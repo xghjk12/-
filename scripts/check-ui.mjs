@@ -220,6 +220,64 @@ try {
   console.log(`   队列抽屉：${result.queue.items} 项`);
   if (result.queue.items < 1) problems.push('播放队列是空的（双击后应当至少有一项）');
 
+  // ---- 顺手批次：拼音检索 / 分组视图 / 问题文件 ----
+  console.log('\n== 4c 拼音检索 / 分组视图 / 问题文件 ==');
+
+  const allRows = () => page.evaluate(() => document.querySelectorAll('.row').length);
+
+  // 内置样本里有两首标题都是「青花瓷」，拼音首字母 qhc
+  await page.fill('.search input', 'qhc');
+  await page.waitForFunction(
+    () => document.querySelectorAll('.row').length === 2,
+    undefined,
+    { timeout: 10_000 },
+  );
+  const pinyinTitles = await page.evaluate(() =>
+    [...document.querySelectorAll('.row .title-main')].map((node) => node.textContent?.trim() ?? ''),
+  );
+  console.log(`   搜「qhc」命中 ${pinyinTitles.length} 首：${pinyinTitles.join('、')}`);
+  if (pinyinTitles.length !== 2 || !pinyinTitles.every((title) => title.startsWith('青花瓷'))) {
+    problems.push(`拼音首字母检索结果不对：${pinyinTitles.join('、') || '（无）'}`);
+  }
+
+  await page.fill('.search input', '');
+  await page.waitForFunction(() => document.querySelectorAll('.row').length >= 4, undefined, {
+    timeout: 10_000,
+  });
+
+  // 分组视图：4 首样本分成「周杰伦」与「未知」两组，点击分组头能收起
+  await page.click('button.nav-item:has-text("艺术家")');
+  await page.waitForSelector('.row-group', { timeout: 10_000 });
+  const groups = await page.evaluate(() => document.querySelectorAll('.row-group').length);
+  const rowsBeforeCollapse = await allRows();
+  await page.click('.row-group');
+  await page.waitForFunction(
+    (before) => document.querySelectorAll('.row').length < before,
+    rowsBeforeCollapse,
+    { timeout: 10_000 },
+  );
+  const rowsAfterCollapse = await allRows();
+  console.log(`   艺术家视图：${groups} 个分组；收起一个分组后行数 ${rowsBeforeCollapse} → ${rowsAfterCollapse}`);
+  if (groups < 2) problems.push(`艺术家分组数异常：${groups}`);
+  if (!(rowsAfterCollapse < rowsBeforeCollapse)) problems.push('点击分组头没有收起分组');
+
+  // 问题文件：内置样本里只有 fake.ape 需要留意
+  await page.click('button.nav-item:has-text("问题文件")');
+  await page.waitForSelector('.diag', { timeout: 10_000 });
+  const diagnostics = await page.evaluate(() => ({
+    rows: document.querySelectorAll('.row').length,
+    summary: document.querySelector('.diag')?.textContent?.trim() ?? '',
+    badge: document.querySelector('.row .badge')?.textContent?.trim() ?? '',
+  }));
+  console.log(`   问题文件：${diagnostics.rows} 首；小结「${diagnostics.summary}」`);
+  if (diagnostics.rows !== 1) problems.push(`问题文件清单数量异常：${diagnostics.rows}`);
+  if (!diagnostics.summary.includes('无法解码')) problems.push('问题文件小结没有说明原因');
+
+  await page.click('button.nav-item:has-text("全部曲目")');
+  await page.waitForFunction(() => document.querySelectorAll('.row').length >= 4, undefined, {
+    timeout: 10_000,
+  });
+
   // ---- 增量缓存：同一批文件再导入一次，必须全部命中（真实 IndexedDB 的命中路径）----
   console.log('\n== 4b 增量缓存与状态持久化 ==');
   const second = await page.evaluate(async () => {
@@ -248,7 +306,8 @@ try {
   const persisted = await page.evaluate(() => window.__qingyinTest.readPersisted());
   console.log(
     `   持久化状态：音量 ${persisted?.volume}、模式 ${persisted?.mode}、` +
-      `曲目 ${persisted?.trackPath}、进度 ${persisted?.positionSec?.toFixed(2)}s`,
+      `曲目 ${persisted?.trackPath}、进度 ${persisted?.positionSec?.toFixed(2)}s、` +
+      `历史 ${persisted?.recentPaths?.length ?? 0} 条`,
   );
   if (!persisted) problems.push('没有从 IndexedDB 读到持久化的播放状态');
   else {
@@ -288,6 +347,9 @@ try {
     problems.push(
       `刷新后进度没有恢复（期望约 ${SEEK_TO}s，实际 ${afterReload.state.resumePositionSec}s）`,
     );
+  }
+  if (!(afterReload.state.recentPaths?.length > 0)) {
+    problems.push('刷新后没有恢复播放历史');
   }
 
   result.persistence = { persisted, afterReload };
