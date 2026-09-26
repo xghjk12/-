@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "fixtures": "node scripts/make-fixtures.mjs",
     "build:m0": "vite build",
+    "dev:m0": "vite --port 5174 --strictPort",
     "check:bundle": "node scripts/check-browser-bundle.mjs",
     "verify": "pnpm typecheck && pnpm test && pnpm check:bundle"
   },

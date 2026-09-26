@@ -4,3 +4,9 @@ dist-m0/
 .tmp-m0/
 *.log
 .DS_Store
+
+# 本地试听用的真实音频：不要提交（tests/fixtures 下的测试样本除外）
+*.flac
+*.mp3
+!tests/fixtures/*.flac
+!tests/fixtures/*.mp3
