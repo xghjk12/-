@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "commonjs",
+  "description": "Demo 是 file:// 直接打开的静态页面，core.js 用 UMD 包装同时供浏览器与 node:test 使用。根目录的 package.json 声明了 \"type\": \"module\"，会让 Node 把 core.js 当 ESM 解析，UMD 包装就走不到 CommonJS 分支、导出为空——所以这里显式声明本目录是 CommonJS。"
+}
