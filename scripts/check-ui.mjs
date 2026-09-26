@@ -138,7 +138,6 @@ try {
   });
   console.log(`   导入内置样本 ${scanned.count} 首：${scanned.paths.join('、')}`);
   if (scanned.count < 4) problems.push(`内置样本没有全部入库（期望 4，实际 ${scanned.count}）`);
-
   await page.waitForSelector('.row', { timeout: 15_000 });
   const renderedRows = await page.locator('.row').count();
 
@@ -182,6 +181,33 @@ try {
   }
   if (result.playback.durationSec < 1) {
     problems.push(`读到的时长异常：${result.playback.durationSec}`);
+  }
+
+  // 不支持格式：双击 APE 应当给出说明并自动跳到下一首可播放的曲目（技术方案 8.2）
+  const apeIndex = scanned.paths.findIndex((item) => item.endsWith('.ape'));
+  if (apeIndex >= 0) {
+    await page.locator('.row').nth(apeIndex).dblclick();
+    // 提示是叠加出现的，要等的是「那一条」说明，而不是随便一条提示
+    await page
+      .waitForFunction(
+        () => [...document.querySelectorAll('.notice')].some((node) => node.textContent?.includes('无法解码')),
+        undefined,
+        { timeout: 5_000 },
+      )
+      .catch(() => undefined);
+    const skipped = await page.evaluate(() => ({
+      notices: [...document.querySelectorAll('.notice')].map((node) => node.textContent?.trim() ?? ''),
+      resumePath: window.__qingyinTest.state().resumePath,
+      paused: window.__qingyinTest.paused(),
+    }));
+    console.log(`   APE 跳过：播放 ${skipped.resumePath}；提示 ${skipped.notices.join(' / ')}`);
+    if (!skipped.notices.some((text) => text.includes('无法解码'))) {
+      problems.push('不可播放的曲目没有给出说明');
+    }
+    if (!skipped.resumePath?.endsWith('plain.mp3')) {
+      problems.push(`没有自动跳到下一首可播放的曲目（实际 ${skipped.resumePath}）`);
+    }
+    if (skipped.paused) problems.push('跳到可播放曲目后没有开始播放');
   }
 
   // 队列抽屉

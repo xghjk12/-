@@ -23,6 +23,7 @@ import { getAudioElement, useAppStore } from './store.js';
 import apeUrl from '../../tests/fixtures/fake.ape?url';
 import flacUrl from '../../tests/fixtures/sample-cn.flac?url';
 import mp3Url from '../../tests/fixtures/sample-cn.mp3?url';
+import plainUrl from '../../tests/fixtures/plain.mp3?url';
 
 interface Check {
   label: string;
@@ -48,6 +49,7 @@ const FIXTURES: Array<{ name: string; url: string }> = [
   { name: 'sample-cn.flac', url: flacUrl },
   { name: 'sample-cn.mp3', url: mp3Url },
   { name: 'fake.ape', url: apeUrl },
+  { name: 'plain.mp3', url: plainUrl },
 ];
 
 /** 取内置样本字节 + 解析结果（走的是和产品完全相同的浏览器解析路径）。 */
@@ -130,7 +132,10 @@ async function nextFrame(): Promise<void> {
 }
 
 async function collect(): Promise<Check[]> {
-  const [flac, mp3, ape] = await Promise.all(FIXTURES.map(({ name, url }) => inspectFixture(name, url)));
+  const results = await Promise.all(
+    FIXTURES.map(({ name, url }) => inspectFixture(name, url)),
+  );
+  const [flac, mp3, ape, plain] = results;
   const checks: Check[] = [];
 
   checks.push(
@@ -156,6 +161,12 @@ async function collect(): Promise<Check[]> {
   checks.push(
     { label: '损坏文件有 parseError', actual: Boolean(ape!.parseError), expected: true },
     { label: '损坏文件标题回退', actual: ape!.title, expected: 'fake' },
+  );
+
+  // 完全没有标签的文件：L3 全文件兜底 + 标题回退文件名
+  checks.push(
+    { label: '无标签文件标题回退', actual: plain!.title, expected: 'plain' },
+    { label: '无标签文件走 L3 全文件兜底', actual: plain!.readStrategy, expected: 'full' },
   );
 
   // 播放判定：APE 读得出标签但放不出声，必须由我们自己标成"只能看信息"

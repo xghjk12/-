@@ -75,9 +75,16 @@ export async function ensureReadPermission(handle: DirectoryHandleLike): Promise
 }
 
 /** 用已列出的 File 对象支撑 open()，避免再次按路径回溯目录树。 */
-function sourceFromFiles(rootName: string, files: Map<string, File>): MusicSource {
+function sourceFromFiles(rootName: string, files: Map<string, File>): BrowserMusicSource {
   return {
     rootName,
+    /**
+     * 播放用：把原始 File 直接交给 `<audio>`，**不把文件读进内存**（技术方案 8.1）。
+     * 元数据解析走 `open()`（区间读取），播放走这里，两条路各取所需。
+     */
+    getFile(path) {
+      return files.get(path);
+    },
     async listAudioFiles(onProgress) {
       const refs: AudioFileRef[] = [];
       for (const [relativePath, file] of files) {
@@ -99,6 +106,11 @@ function sourceFromFiles(rootName: string, files: Map<string, File>): MusicSourc
   };
 }
 
+/** 浏览器侧曲库来源：比通用接口多一个「拿到原始 File」的能力，供播放使用。 */
+export interface BrowserMusicSource extends MusicSource {
+  getFile(path: string): File | undefined;
+}
+
 /** 遍历期间定期让出事件循环，避免大目录把主线程按住。 */
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -108,7 +120,7 @@ function yieldToEventLoop(): Promise<void> {
 export async function collectFromDirectoryHandle(
   handle: DirectoryHandleLike,
   onProgress?: (found: number) => void,
-): Promise<MusicSource> {
+): Promise<BrowserMusicSource> {
   const files = new Map<string, File>();
   let sinceYield = 0;
 
@@ -135,7 +147,7 @@ export async function collectFromDirectoryHandle(
 }
 
 /** 回退路：`<input webkitdirectory>` 给出的 FileList，用 webkitRelativePath 作为相对路径。 */
-export function sourceFromFileList(fileList: FileList): MusicSource {
+export function sourceFromFileList(fileList: FileList): BrowserMusicSource {
   const files = new Map<string, File>();
   for (const file of Array.from(fileList)) {
     const relativePath = joinRelativePath(
@@ -148,7 +160,7 @@ export function sourceFromFileList(fileList: FileList): MusicSource {
 }
 
 export interface PickedDirectory {
-  source: MusicSource;
+  source: BrowserMusicSource;
   handle: DirectoryHandleLike;
 }
 
