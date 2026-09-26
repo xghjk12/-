@@ -10,6 +10,7 @@
  * state 的引用不变，界面反而看不到更新。
  */
 import type { SortDirection, TrackSortKey } from './track.js';
+import { pinyinInitialsVariants } from './pinyin.js';
 
 /** 参与排序/检索的最小字段集合，Track 天然满足它。 */
 export interface SortableTrack {
@@ -17,6 +18,14 @@ export interface SortableTrack {
   artist?: string;
   album?: string;
   durationSec?: number;
+  /**
+   * 预计算的检索键（见 `buildSearchKey`）。
+   *
+   * 之所以要预计算：拼音首字母要逐字查表，3000 首 × 每首几十个字，
+   * 每次敲键都现算会明显卡手。它由 `buildTrack` 在入库时写好；
+   * 老版本缓存里的记录没有这个字段，`filterTracks` 会现场兜底（正确性优先）。
+   */
+  searchKey?: string;
 }
 
 /** 复用的中文 collator；构造失败时为 null，走 localeCompare 兜底。 */
@@ -75,18 +84,43 @@ export function normalizeForSearch(value: unknown): string {
 }
 
 /**
+ * 检索键的分隔符：用不可能出现在标签里的控制字符，避免"拼音首字母段"和"字段段"黏在一起
+ * 产生跨段的假命中。
+ */
+const SEARCH_KEY_SEPARATOR = '\u0000';
+
+/**
+ * 为一个曲目预计算检索键：`规范化后的标题/艺术家/专辑` + 分隔符 + `各字段的拼音首字母变体`。
+ *
+ * 检索时只要在这一个字符串上做子串匹配，就能同时命中三种输入：
+ *  - 汉字子串（「青花」）
+ *  - 拉丁字母（「duvet」、忽略变音符号的「boa」）
+ *  - 拼音首字母（「qhc」、「zjl」）
+ */
+export function buildSearchKey(track: SortableTrack): string {
+  const fields = [track.title, track.artist, track.album];
+  const parts = fields.map((field) => normalizeForSearch(field)).filter(Boolean);
+
+  const initials = new Set<string>();
+  for (const field of fields) {
+    for (const variant of pinyinInitialsVariants(toText(field))) initials.add(variant);
+  }
+
+  return parts.join(' ') + SEARCH_KEY_SEPARATOR + [...initials].join(' ');
+}
+
+/**
  * 子串匹配标题 / 艺术家 / 专辑，忽略大小写与拉丁变音符号，查询串两端空白忽略。
  * 空查询返回全部（依然是新数组）。
+ *
+ * 匹配对象是预计算的检索键（含拼音首字母）；老缓存里没有检索键的记录会现场兜底。
  */
 export function filterTracks<T extends SortableTrack>(tracks: readonly T[], query: string): T[] {
   const needle = normalizeForSearch(query).trim();
   if (!needle) return tracks.slice();
   return tracks.filter((track) => {
-    return (
-      normalizeForSearch(track.title).includes(needle) ||
-      normalizeForSearch(track.artist).includes(needle) ||
-      normalizeForSearch(track.album).includes(needle)
-    );
+    const key = track.searchKey ?? buildSearchKey(track);
+    return key.includes(needle);
   });
 }
 

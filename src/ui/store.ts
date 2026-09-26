@@ -13,7 +13,7 @@
 import { create } from 'zustand';
 import { isValidMode, nextMode, removeQueueItem } from '../core/queue.js';
 import type { PlayMode } from '../core/queue.js';
-import { filterTracks, sortTracks } from '../core/sort.js';
+import { filterTracks, buildSearchKey, sortTracks } from '../core/sort.js';
 import type { SortDirection, Track, TrackSortKey } from '../core/track.js';
 import { createAudioEngine } from '../platform/audioEngine.js';
 import type { AudioEngine } from '../platform/audioEngine.js';
@@ -541,6 +541,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
           services.storage.loadHandle(MUSIC_SOURCE_ID),
         ]);
 
+        // 旧版本缓存里的曲目没有检索键（没有拼音首字母）：在内存里补算一次，
+        // 免得每次敲键都为几千首现算。下次扫描入库时会自然带上。
+        const tracks = cached.map((track) =>
+          track.searchKey
+            ? track
+            : {
+                ...track,
+                searchKey: buildSearchKey({
+                  title: track.title,
+                  artist: track.artist,
+                  album: track.album,
+                }),
+              },
+        );
+
         engine = createAudioEngine(engineHandlers());
         controller = createPlaybackController(playbackEnv());
 
@@ -550,7 +565,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         set({
           ready: true,
           persistent: services.persistent,
-          tracks: cached,
+          tracks,
           volume: saved?.volume ?? INITIAL.volume,
           muted: saved?.muted ?? false,
           mode: saved?.mode && isValidMode(saved.mode) ? saved.mode : 'sequence',

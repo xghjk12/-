@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareText, filterTracks, groupBy, normalizeForSearch, sortTracks } from './sort.js';
+import { buildSearchKey, compareText, filterTracks, groupBy, normalizeForSearch, sortTracks } from './sort.js';
 import type { SortableTrack } from './sort.js';
 
 /** 与 Demo 用例同形的小样本，便于逐条对照断言。 */
@@ -249,5 +249,80 @@ describe('normalizeForSearch 与带变音符号的检索', () => {
     const tracks: SortableTrack[] = [{ title: 'Duvet', artist: 'bôa' }];
     const result = filterTracks(tracks, 'boa');
     expect(result[0]?.artist).toBe('bôa');
+  });
+});
+
+describe('拼音首字母检索', () => {
+  const tracks: SortableTrack[] = [
+    { title: '青花瓷', artist: '周杰伦', album: '我很忙' },
+    { title: 'Duvet', artist: 'bôa', album: 'Twilight' },
+    { title: '第2首', artist: '苏晚晴', album: '晨光练习曲' },
+  ];
+
+  it('搜首字母能命中汉字标签', () => {
+    expect(filterTracks(tracks, 'zjl').map((t) => t.title)).toEqual(['青花瓷']);
+    expect(filterTracks(tracks, 'qhc').map((t) => t.title)).toEqual(['青花瓷']);
+    // 艺术家、专辑同样参与
+    expect(filterTracks(tracks, 'swq').map((t) => t.title)).toEqual(['第2首']);
+    expect(filterTracks(tracks, 'cglxq').map((t) => t.title)).toEqual(['第2首']);
+  });
+
+  it('首字母是子串匹配，所以片段也能命中', () => {
+    expect(filterTracks(tracks, 'jl').map((t) => t.title)).toEqual(['青花瓷']);
+    expect(filterTracks(tracks, 'hc').map((t) => t.title)).toEqual(['青花瓷']);
+  });
+
+  it('大小写与汉字检索互不影响', () => {
+    expect(filterTracks(tracks, 'ZJL').map((t) => t.title)).toEqual(['青花瓷']);
+    expect(filterTracks(tracks, '青花').map((t) => t.title)).toEqual(['青花瓷']);
+  });
+
+  it('多音字用另一个读音也能搜到（乐队 → yd / ld）', () => {
+    const band: SortableTrack[] = [{ title: '纸飞机乐队' }, { title: '晨光' }];
+    expect(filterTracks(band, 'yd').map((t) => t.title)).toEqual(['纸飞机乐队']);
+    expect(filterTracks(band, 'zfjld').map((t) => t.title)).toEqual(['纸飞机乐队']);
+  });
+
+  it('已知限制：不支持全拼（搜 qinghua 找不到青花瓷）', () => {
+    expect(filterTracks(tracks, 'qinghua')).toEqual([]);
+  });
+});
+
+describe('buildSearchKey 与预计算检索键', () => {
+  const tracks: SortableTrack[] = [
+    { title: '青花瓷', artist: '周杰伦', album: '我很忙' },
+    { title: 'Duvet', artist: 'bôa', album: 'Twilight' },
+    { title: '第2首', artist: '苏晚晴', album: '晨光练习曲' },
+  ];
+
+  it('检索键包含规范化字段与拼音首字母两段', () => {
+    const key = buildSearchKey({ title: '青花瓷', artist: '周杰伦', album: '我很忙' });
+
+    expect(key).toContain('青花瓷');
+    expect(key).toContain('qhc');
+    expect(key).toContain('zjl');
+    expect(key).toContain('whm');
+  });
+
+  it('预计算与现算得到同样的检索结果', () => {
+    const withKey = tracks.map((track) => ({ ...track, searchKey: buildSearchKey(track) }));
+
+    for (const query of ['zjl', 'qhc', 'boa', 'duvet', '第2', 'cglxq']) {
+      expect(
+        filterTracks(withKey, query).map((t) => t.title),
+        query,
+      ).toEqual(filterTracks(tracks, query).map((t) => t.title));
+    }
+  });
+
+  it('跨字段不会产生假命中（标题 a + 艺术家 b 不会被 ab 命中）', () => {
+    const parts: SortableTrack[] = [{ title: 'alpha', artist: 'bravo' }];
+    expect(filterTracks(parts, 'ab')).toEqual([]);
+    expect(filterTracks(parts, 'alpha')).toHaveLength(1);
+  });
+
+  it('缺字段不抛异常', () => {
+    expect(() => buildSearchKey({})).not.toThrow();
+    expect(buildSearchKey({})).toBeTruthy();
   });
 });

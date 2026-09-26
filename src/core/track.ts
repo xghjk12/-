@@ -36,6 +36,14 @@ export interface Track {
   readonly bitrate?: number;
   readonly sampleRate?: number;
 
+  /**
+   * 预计算的检索键：规范化字段 + 拼音首字母变体（见 `core/sort.ts` 的 `buildSearchKey`）。
+   *
+   * 旧版本写入的缓存记录里没有这个字段，读取时会被现场兜底或补算，
+   * 所以类型上是可选；新入库的记录一律带上。
+   */
+  readonly searchKey?: string;
+
   /** 播放判定：`decodable` 能播，`metadata-only` 只能看信息。 */
   readonly verdict: PlaybackVerdict;
   /** 不可播放时给用户看的说明。 */

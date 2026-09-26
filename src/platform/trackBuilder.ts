@@ -7,6 +7,7 @@
  */
 import { classifyAudioFile, extensionOf, resolveVerdict } from '../core/audioFormats.js';
 import { cacheKey as makeCacheKey } from '../core/library.js';
+import { buildSearchKey } from '../core/sort.js';
 import type { Track } from '../core/track.js';
 import type { TrackMetadata } from './metadata.js';
 import type { AudioFileRef } from './musicSource.js';
@@ -42,6 +43,13 @@ export function buildTrack(ref: AudioFileRef, metadata: TrackMetadata, addedAt: 
     lossless: metadata.lossless,
     bitrate: metadata.bitrate,
     sampleRate: metadata.sampleRate,
+
+    // 入库时就把检索键算好：搜索是逐键触发的，不能每次现算拼音
+    searchKey: buildSearchKey({
+      title: metadata.title,
+      artist: metadata.artist,
+      album: metadata.album,
+    }),
 
     verdict: verdict.verdict,
     verdictNote: verdict.note,
