@@ -19,6 +19,7 @@ import type { Track } from '../core/track.js';
 import { blobByteSource } from '../platform/byteSource.js';
 import { readMetadata } from '../platform/metadata.js';
 import { getAudioElement, useAppStore } from './store.js';
+import { getServices } from './services.js';
 
 import apeUrl from '../../tests/fixtures/fake.ape?url';
 import flacUrl from '../../tests/fixtures/sample-cn.flac?url';
@@ -51,6 +52,14 @@ const FIXTURES: Array<{ name: string; url: string }> = [
   { name: 'fake.ape', url: apeUrl },
   { name: 'plain.mp3', url: plainUrl },
 ];
+
+/**
+ * 内置样本的固定修改时间。
+ *
+ * 必须固定：缓存键包含「路径 + 大小 + 修改时间」，而 `new File()` 默认把 lastModified
+ * 设成当下时刻——那样每次导入都会被判成"文件变了"，增量缓存的命中路径就永远测不到。
+ */
+const FIXTURE_MODIFIED_AT = Date.UTC(2026, 0, 1, 0, 0, 0);
 
 /** 取内置样本字节 + 解析结果（走的是和产品完全相同的浏览器解析路径）。 */
 async function inspectFixture(name: string, url: string): Promise<FixtureResult> {
@@ -242,7 +251,7 @@ function installTestHooks(): void {
       const files = await Promise.all(
         FIXTURES.map(async ({ name, url }) => {
           const response = await fetch(url);
-          return new File([await response.blob()], name);
+          return new File([await response.blob()], name, { lastModified: FIXTURE_MODIFIED_AT });
         }),
       );
       const transfer = new DataTransfer();
@@ -250,6 +259,26 @@ function installTestHooks(): void {
       await useAppStore.getState().useFileList(transfer.files);
       return useAppStore.getState().tracks.length;
     },
+    /** 本轮扫描的统计（命中 / 新解析 / 遍历耗时…），用于验证增量缓存真的生效。 */
+    scan: () => useAppStore.getState().scan,
+    /** 直接读 IndexedDB 里持久化的播放状态，验证"写进去的是真数据"。 */
+    readPersisted: async () => (await getServices()).storage.readState(),
+    setVolume: (volume: number) => useAppStore.getState().setVolume(volume),
+    cycleMode: () => useAppStore.getState().cycleMode(),
+    togglePlay: () => useAppStore.getState().togglePlay(),
+    /**
+     * 跳到指定进度并立刻落盘。
+     *
+     * 冒烟脚本需要一个**确定性**的进度值来验证"进度真的存进了 IndexedDB"，
+     * 靠正在播放的曲目自己推进是不确定的（测试样本只有 1–2 秒，很容易已经播完）。
+     */
+    seekAndFlush: async (positionSec: number) => {
+      useAppStore.getState().seek(positionSec);
+      const services = await getServices();
+      await services.writer.flush();
+      return useAppStore.getState().resumePositionSec;
+    },
+    openQueue: () => useAppStore.getState().toggleQueue(),
     tracks: () => useAppStore.getState().tracks.map((track) => track.path),
     state: () => {
       const state = useAppStore.getState();
@@ -262,6 +291,9 @@ function installTestHooks(): void {
         muted: state.muted,
         queueOpen: state.queueOpen,
         resumePath: state.resumePath,
+        resumePositionSec: state.resumePositionSec,
+        ready: state.ready,
+        persistent: state.persistent,
       };
     },
     positionSec: () => getAudioElement()?.currentTime ?? 0,

@@ -220,6 +220,78 @@ try {
   console.log(`   队列抽屉：${result.queue.items} 项`);
   if (result.queue.items < 1) problems.push('播放队列是空的（双击后应当至少有一项）');
 
+  // ---- 增量缓存：同一批文件再导入一次，必须全部命中（真实 IndexedDB 的命中路径）----
+  console.log('\n== 4b 增量缓存与状态持久化 ==');
+  const second = await page.evaluate(async () => {
+    const count = await window.__qingyinTest.loadFixtureLibrary();
+    return { count, scan: window.__qingyinTest.scan() };
+  });
+  console.log(
+    `   二次导入 ${second.count} 首：缓存命中 ${second.scan.reused}、新解析 ${second.scan.parsed}、` +
+      `遍历 ${second.scan.listingMs}ms、扫描 ${second.scan.elapsedMs}ms`,
+  );
+  if (second.scan.reused < 4 || second.scan.parsed !== 0) {
+    problems.push(
+      `增量缓存没有全部命中（命中 ${second.scan.reused}、新解析 ${second.scan.parsed}）`,
+    );
+  }
+
+  // 改音量与播放模式，并把进度跳到一个确定值再落盘，稍后验证它们都能从 IndexedDB 恢复
+  const SEEK_TO = 1.25;
+  await page.evaluate(async (positionSec) => {
+    window.__qingyinTest.setVolume(0.42);
+    window.__qingyinTest.cycleMode();
+    await window.__qingyinTest.seekAndFlush(positionSec);
+  }, SEEK_TO);
+  await page.waitForTimeout(200);
+
+  const persisted = await page.evaluate(() => window.__qingyinTest.readPersisted());
+  console.log(
+    `   持久化状态：音量 ${persisted?.volume}、模式 ${persisted?.mode}、` +
+      `曲目 ${persisted?.trackPath}、进度 ${persisted?.positionSec?.toFixed(2)}s`,
+  );
+  if (!persisted) problems.push('没有从 IndexedDB 读到持久化的播放状态');
+  else {
+    if (Math.abs(persisted.volume - 0.42) > 0.001) problems.push(`音量没有落盘（${persisted.volume}）`);
+    if (persisted.mode !== 'repeat-all') problems.push(`播放模式没有落盘（${persisted.mode}）`);
+    if (!persisted.trackPath) problems.push('当前曲目没有落盘');
+    if (Math.abs(persisted.positionSec - SEEK_TO) > 0.01) {
+      problems.push(`播放进度没有落盘（期望 ${SEEK_TO}，实际 ${persisted.positionSec}）`);
+    }
+  }
+
+  // ---- 刷新：列表必须纯靠缓存立刻回来，状态与进度一并恢复 ----
+  await page.reload({ waitUntil: 'load', timeout: 30_000 });
+  await page.waitForSelector('.row', { timeout: 15_000 });
+  const afterReload = await page.evaluate(() => ({
+    rows: document.querySelectorAll('.row').length,
+    state: window.__qingyinTest.state(),
+    scan: window.__qingyinTest.scan(),
+    tracks: window.__qingyinTest.tracks().length,
+  }));
+  console.log(
+    `   刷新后：列表 ${afterReload.rows} 行（缓存 ${afterReload.tracks} 首）、` +
+      `扫描阶段 ${afterReload.scan.phase}、音量 ${afterReload.state.volume}、模式 ${afterReload.state.mode}、` +
+      `恢复曲目 ${afterReload.state.resumePath}@${afterReload.state.resumePositionSec?.toFixed?.(2) ?? '-'}s`,
+  );
+  if (afterReload.tracks < 4) problems.push(`刷新后曲库没有从缓存恢复（${afterReload.tracks} 首）`);
+  if (afterReload.rows < 1) problems.push('刷新后列表没有渲染');
+  if (afterReload.scan.phase !== 'idle') problems.push('刷新后不应触发扫描');
+  if (Math.abs(afterReload.state.volume - 0.42) > 0.001) {
+    problems.push(`刷新后音量没有恢复（${afterReload.state.volume}）`);
+  }
+  if (afterReload.state.mode !== 'repeat-all') {
+    problems.push(`刷新后播放模式没有恢复（${afterReload.state.mode}）`);
+  }
+  if (!afterReload.state.resumePath) problems.push('刷新后没有恢复上次播放的曲目');
+  if (Math.abs(afterReload.state.resumePositionSec - SEEK_TO) > 0.05) {
+    problems.push(
+      `刷新后进度没有恢复（期望约 ${SEEK_TO}s，实际 ${afterReload.state.resumePositionSec}s）`,
+    );
+  }
+
+  result.persistence = { persisted, afterReload };
+
   // 截图前收起自检面板，留一张干净的界面图
   await page.evaluate(() => document.getElementById('selfTestResult')?.remove());
   await mkdir(shotDir, { recursive: true });
