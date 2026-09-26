@@ -169,3 +169,71 @@ describe('collectFromDirectoryHandle：递归遍历', () => {
     expect(fromList.map((ref) => ref.path)).toEqual(fromHandle.map((ref) => ref.path));
   });
 });
+
+describe('歌词文件的收集', () => {
+  it('FileList 入口会把 .lrc 收进歌词表，且不混进音频表', async () => {
+    const source = sourceFromFileList(
+      asFileList([
+        fakeFile('01 青花瓷.flac', '音乐/专辑/01 青花瓷.flac'),
+        fakeFile('01 青花瓷.lrc', '音乐/专辑/01 青花瓷.lrc'),
+        fakeFile('cover.jpg', '音乐/专辑/cover.jpg'),
+        fakeFile('周杰伦 - 我很忙.LRC', '音乐/专辑/周杰伦 - 我很忙.LRC'),
+      ]),
+    );
+
+    const audio = await source.listAudioFiles();
+    const lyrics = await source.listLyricFiles();
+
+    expect(audio.map((ref) => ref.path)).toEqual(['专辑/01 青花瓷.flac']);
+    expect(lyrics.map((ref) => ref.path)).toEqual([
+      '专辑/01 青花瓷.lrc',
+      '专辑/周杰伦 - 我很忙.LRC',
+    ]);
+  });
+
+  it('openLyricBytes 能读出歌词内容（保持原始字节，解码交给 core）', async () => {
+    const gbk = new Uint8Array([0xc7, 0xe0, 0xbb, 0xa8, 0xb4, 0xc9]);
+    const file = new File([gbk], 'a.lrc');
+    Object.defineProperty(file, 'webkitRelativePath', { value: '音乐/a.lrc' });
+    const source = sourceFromFileList(asFileList([file]));
+
+    const refs = await source.listLyricFiles();
+    expect(refs).toHaveLength(1);
+    await expect(source.openLyricBytes(refs[0]!)).resolves.toEqual(gbk);
+  });
+
+  it('句柄入口同样收集 .lrc，且递归子目录', async () => {
+    const handle: DirectoryHandleLike = {
+      kind: 'directory',
+      name: '音乐',
+      values: async function* () {
+        yield {
+          kind: 'file' as const,
+          name: 'a.flac',
+          getFile: async () => fakeFile('a.flac'),
+        };
+        yield {
+          kind: 'file' as const,
+          name: 'a.lrc',
+          getFile: async () => fakeFile('a.lrc'),
+        };
+        yield {
+          kind: 'directory' as const,
+          name: '歌词',
+          values: async function* () {
+            yield {
+              kind: 'file' as const,
+              name: 'b.lrc',
+              getFile: async () => fakeFile('b.lrc'),
+            };
+          },
+        };
+      },
+    };
+
+    const source = await collectFromDirectoryHandle(handle);
+    const lyrics = await source.listLyricFiles();
+
+    expect(lyrics.map((ref) => ref.path).sort()).toEqual(['a.lrc', '歌词/b.lrc']);
+  });
+});

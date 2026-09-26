@@ -26,6 +26,18 @@ const SNIPPET_BYTES = 24 * 1024;
 const ALBUMS = 30;
 const APE_EVERY = 97;
 
+/** 每个音频旁边放一份同名 `.lrc`，用来量"歌词认领"这一步在数千首规模下的开销。 */
+function lyricText(index) {
+  const lines = [];
+  for (let i = 0; i < 20; i += 1) {
+    const seconds = i * 8;
+    const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
+    const ss = String(seconds % 60).padStart(2, '0');
+    lines.push(`[${mm}:${ss}.00]第 ${index} 首的第 ${i + 1} 句歌词`);
+  }
+  return `[ti:曲目 ${index}]\n[ar:基准测试]\n${lines.join('\n')}\n`;
+}
+
 const count = Number.parseInt(process.argv[2] ?? '3000', 10);
 if (!Number.isFinite(count) || count <= 0) {
   console.error('用法：node scripts/make-bench-fixtures.mjs [数量]');
@@ -49,13 +61,17 @@ for (let album = 0; album < ALBUMS && written < count; album += 1) {
 
   // 每个专辑目录里放一个非音频文件，用来验证遍历会把它过滤掉
   await writeFile(path.join(albumDir, 'cover.jpg'), 'not really a jpeg');
+  // 放一份"认不出对应哪首"的歌词，用来验证 unmatched 统计
+  await writeFile(path.join(albumDir, '无对应曲目.lrc'), '[00:00.00]孤立歌词\n');
 
   for (let track = 0; track < perAlbum && written < count; track += 1) {
     const index = written + 1;
     const isApe = index % APE_EVERY === 0;
     const extension = isApe ? 'ape' : 'mp3';
-    const name = `${String(track + 1).padStart(3, '0')} 曲目 ${String(index).padStart(5, '0')}.${extension}`;
-    await writeFile(path.join(albumDir, name), isApe ? apeBytes : snippet);
+    const stem = `${String(track + 1).padStart(3, '0')} 曲目 ${String(index).padStart(5, '0')}`;
+    await writeFile(path.join(albumDir, `${stem}.${extension}`), isApe ? apeBytes : snippet);
+    // 同名 .lrc：会被"同名"规则自动认领（假的 .ape 也放一份，顺便测不支持格式的曲目照样能配歌词）
+    await writeFile(path.join(albumDir, `${stem}.lrc`), lyricText(index));
     written += 1;
   }
 

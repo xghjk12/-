@@ -116,7 +116,8 @@ async function waitForScan(page, previousRunId) {
     (before) => {
       const scan = window.__qingyinTest.scan();
       if (!scan || scan.runId <= before) return false;
-      return scan.active === false && scan.phase !== 'listing' && scan.phase !== 'parsing';
+      // 歌词认领也算扫描的一部分，必须等它结束
+      return scan.active === false && scan.phase !== 'listing' && scan.phase !== 'parsing' && scan.phase !== 'lyrics';
     },
     previousRunId,
     { timeout: 15 * 60_000 },
@@ -167,6 +168,27 @@ try {
     performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1024 / 1024) : null,
   );
 
+  // 歌词认领是否真的发生了：抽查第一首曲目的记录
+  const lyricProbe = await page.evaluate(async () => {
+    const paths = window.__qingyinTest.tracks();
+    const first = paths[0];
+    const record = first ? await window.__qingyinTest.readLyrics(first) : null;
+    const files = await window.__qingyinTest.lyricFiles();
+    return {
+      first,
+      hasLyrics: Boolean(record),
+      source: record?.source ?? null,
+      text: record?.text?.slice(0, 30) ?? null,
+      lyricFiles: files,
+    };
+  });
+  console.log(
+    `   歌词抽查：音频 ${lyricProbe.lyricFiles.audioCount} 首、歌词 ${lyricProbe.lyricFiles.count} 个` +
+      `\n     歌词清单（前 12）：${lyricProbe.lyricFiles.sample.slice(0, 12).join(' | ') || '（空）'}` +
+      `\n     ${lyricProbe.first} → ${lyricProbe.hasLyrics ? `${lyricProbe.source}「${lyricProbe.text?.split('\\n')[0]}…」` : '没有歌词记录'}` +
+      `\n     认领结果：${JSON.stringify(result.firstScan.lyricStats ?? null)}`,
+  );
+
   console.log('\n== 5/6 二次扫描（应全部命中缓存）==');
   const runIdBeforeSecond = await page.evaluate(() => window.__qingyinTest.scan().runId);
   await importLibrary(page);
@@ -180,6 +202,7 @@ try {
     `   分项：读目录清单 ${t2.listFilesMs}ms、读元数据缓存 ${t2.cachedTracksMs}ms、` +
       `列出来源 ${t2.sourceListMs}ms、逐文件处理 ${t2.loopMs}ms、清理 ${t2.cleanupMs}ms`,
   );
+  console.log(`   歌词认领（单独一步）：${result.secondScan.lyricSyncMs}ms ${JSON.stringify(result.secondScan.lyricStats ?? null)}`);
 
   console.log('\n== 6/6 刷新后打开与滚动 ==');
   const rowsBefore = await page.locator('.row').count();
@@ -231,6 +254,11 @@ try {
   result.rowsBeforeReload = rowsBefore;
   result.afterReload = afterReload;
 
+  if (consoleErrors.length > 0) {
+    console.log(`\n   控制台报错 ${consoleErrors.length} 条：`);
+    for (const line of consoleErrors.slice(0, 5)) console.log(`     ✗ ${line}`);
+  }
+
   await mkdir(outDir, { recursive: true });
   await writeFile(path.join(outDir, 'result.json'), JSON.stringify(result, null, 2));
   console.log(`\n   结果已写入 ${path.relative(root, path.join(outDir, 'result.json'))}`);
@@ -251,6 +279,7 @@ if (result.firstScan) {
       `首次扫描        ${(firstTotal / 1000).toFixed(1)}s（遍历 ${result.firstScan.listingMs}ms + 解析入库 ${result.firstScan.elapsedMs}ms）`,
       `实际读取        ${mb(result.firstScan.bytesRead)}`,
       `二次扫描        ${result.secondScan ? result.secondScan.listingMs + result.secondScan.elapsedMs : '-'}ms（命中 ${result.secondScan?.reused ?? '-'}）`,
+      `歌词认领        ${result.secondScan?.lyricSyncMs ?? '-'}ms`,
       `刷新到可见      ${result.coldOpenMs}ms`,
       `滚动            ${result.scroll ? `${result.scroll.fps.toFixed(1)} fps` : '-'}`,
       `JS 堆占用       ${result.heapMB ?? '-'}MB`,

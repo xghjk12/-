@@ -129,9 +129,17 @@ function sourceFromFiles(
   };
 }
 
-/** 浏览器侧曲库来源：比通用接口多一个「拿到原始 File」的能力，供播放使用。 */
+/**
+ * 浏览器侧曲库来源。
+ *
+ * 比通用接口多两处能力：拿到原始 `File`（供播放用），以及**必定支持歌词**
+ * （`MusicSource` 里那两个方法是可选的，浏览器实现始终提供，所以这里收紧成必选，
+ * 调用方不必到处判断）。
+ */
 export interface BrowserMusicSource extends MusicSource {
   getFile(path: string): File | undefined;
+  listLyricFiles(): Promise<LyricFileRef[]>;
+  openLyricBytes(ref: LyricFileRef): Promise<Uint8Array>;
 }
 
 /** 遍历期间定期让出事件循环，避免大目录把主线程按住。 */

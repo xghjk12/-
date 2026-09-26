@@ -72,13 +72,16 @@ function ScanPanel() {
   if (!scan.active) return null;
 
   const listing = scan.phase === 'listing';
+  const lyrics = scan.phase === 'lyrics';
   const total = scan.total || 0;
-  const ratio = listing ? 0 : total > 0 ? Math.min(1, (scan.parsed + scan.reused) / total) : 0;
+  const ratio = listing || lyrics ? (lyrics ? 1 : 0) : total > 0 ? Math.min(1, (scan.parsed + scan.reused) / total) : 0;
 
   return (
     <div className="scan">
       <div className="scan-head">
-        <strong>{listing ? '正在遍历文件夹…' : '正在解析元数据…'}</strong>
+        <strong>
+          {listing ? '正在遍历文件夹…' : lyrics ? '正在认领歌词…' : '正在解析元数据…'}
+        </strong>
         <button className="btn btn-quiet" onClick={cancelScan}>
           取消
         </button>

@@ -187,6 +187,59 @@ describe('matchLyrics：歧义与不匹配', () => {
     expect(result).toEqual({ assignments: [], unmatched: [], ambiguous: [] });
   });
 
+  it('真实曲库形态：文件名与标签完全不同的曲目也能靠文件名认领', () => {
+    // 基准测试库就是这样：文件名是「001 曲目 00004.mp3」，标签却是「青花瓷」。
+    // 认领必须走文件名（same-name），不能被标签带偏。
+    const result = matchLyrics(
+      [
+        {
+          path: '专辑 004/001 曲目 00004.mp3',
+          name: '001 曲目 00004.mp3',
+          title: '青花瓷',
+          artist: '周杰伦',
+          album: '我很忙',
+        },
+      ],
+      [{ path: '专辑 004/001 曲目 00004.lrc', name: '001 曲目 00004.lrc' }],
+    );
+
+    expect(result.assignments).toEqual([
+      {
+        trackPath: '专辑 004/001 曲目 00004.mp3',
+        lyricPath: '专辑 004/001 曲目 00004.lrc',
+        reason: 'same-name',
+        score: 100,
+      },
+    ]);
+  });
+
+  it('同一专辑里多首曲目各自的同名歌词都能认领', () => {
+    const targets = [
+      { path: '专辑 001/001 曲目 00001.mp3', name: '001 曲目 00001.mp3', title: '青花瓷' },
+      { path: '专辑 001/002 曲目 00002.mp3', name: '002 曲目 00002.mp3', title: '青花瓷' },
+    ];
+    const result = matchLyrics(targets, [
+      { path: '专辑 001/001 曲目 00001.lrc', name: '001 曲目 00001.lrc' },
+      { path: '专辑 001/002 曲目 00002.lrc', name: '002 曲目 00002.lrc' },
+    ]);
+
+    expect(result.assignments).toHaveLength(2);
+    expect(result.unmatched).toEqual([]);
+  });
+
+  it('目录里还混着别的 .lrc 时不影响正确认领', () => {
+    const result = matchLyrics(
+      [{ path: '专辑 001/001 曲目 00001.mp3', name: '001 曲目 00001.mp3', title: '青花瓷' }],
+      [
+        { path: '专辑 001/001 曲目 00001.lrc', name: '001 曲目 00001.lrc' },
+        { path: '专辑 001/无对应曲目.lrc', name: '无对应曲目.lrc' },
+      ],
+    );
+
+    expect(result.assignments).toHaveLength(1);
+    expect(result.unmatched.map((item) => item.path)).toEqual(['专辑 001/无对应曲目.lrc']);
+  });
+
   it('没有曲目时所有歌词都算 unmatched', () => {
     const result = matchLyrics([], [lyric('a.lrc')]);
     expect(result.assignments).toEqual([]);

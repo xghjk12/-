@@ -19,7 +19,7 @@ import { currentLineIndex, isLyricFileName, parseLyrics } from '../core/lyrics.j
 import type { Track } from '../core/track.js';
 import { blobByteSource } from '../platform/byteSource.js';
 import { readMetadata } from '../platform/metadata.js';
-import { getAudioElement, useAppStore } from './store.js';
+import { getActiveSource, getAudioElement, useAppStore } from './store.js';
 import { getServices } from './services.js';
 
 import apeUrl from '../../tests/fixtures/fake.ape?url';
@@ -285,6 +285,19 @@ function installTestHooks(): void {
     },
     /** 读某首曲目已保存的歌词记录（验证自动认领/导入是否落库）。 */
     readLyrics: async (path: string) => (await getServices()).storage.getLyrics(path),
+    /** 调试用：当前来源到底交进来了多少歌词文件。 */
+    lyricFiles: async () => {
+      const source = getActiveSource();
+      if (!source?.listLyricFiles) return { supported: false, count: 0, sample: [] as string[] };
+      const refs = await source.listLyricFiles();
+      const audio = await source.listAudioFiles();
+      return {
+        supported: true,
+        count: refs.length,
+        audioCount: audio.length,
+        sample: refs.map((ref) => ref.path),
+      };
+    },
     /** 本轮扫描的统计（命中 / 新解析 / 遍历耗时…），用于验证增量缓存真的生效。 */
     scan: () => useAppStore.getState().scan,
     /** 直接读 IndexedDB 里持久化的播放状态，验证"写进去的是真数据"。 */

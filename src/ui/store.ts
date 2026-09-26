@@ -35,6 +35,7 @@ import {
 } from '../platform/mediaSession.js';
 import { scanLibrary } from '../platform/scanner.js';
 import { syncLyrics } from '../platform/lyricSync.js';
+import type { LyricSyncStats } from '../platform/lyricSync.js';
 import type { PlaybackState } from '../platform/storage.js';
 import { createPlaybackController } from './playback.js';
 import type { PlaybackController, PlaybackSnapshot } from './playback.js';
@@ -60,7 +61,13 @@ export interface ScanStatus {
   /** 本轮扫描的序号：界面与自动化脚本靠它区分"上一轮"和"这一轮"。 */
   runId: number;
   active: boolean;
-  phase: 'idle' | 'listing' | 'parsing' | 'done' | 'aborted';
+  /**
+   * 扫描阶段。
+   *
+   * `lyrics` 是刻意单独一档：歌词认领发生在音频扫描**之后**，如果这里直接报 done，
+   * 界面与自动化脚本都会以为"已经全部就绪"，从而读到还没写进去的歌词。
+   */
+  phase: 'idle' | 'listing' | 'parsing' | 'lyrics' | 'done' | 'aborted';
   found: number;
   total: number;
   parsed: number;
@@ -75,6 +82,10 @@ export interface ScanStatus {
   bytesRead: number;
   /** 清理掉的、已经不在磁盘上的文件数。 */
   removed: number;
+  /** 歌词认领单独一步，它的耗时也单独记（数千首时这步要读所有 .lrc）。 */
+  lyricSyncMs: number;
+  /** 歌词认领的结果统计。 */
+  lyricStats?: LyricSyncStats;
   /** 分项耗时：用来回答"这次扫描的时间花在哪了"。 */
   timing: {
     listFilesMs: number;
@@ -106,6 +117,7 @@ const IDLE_SCAN: ScanStatus = {
   elapsedMs: 0,
   bytesRead: 0,
   removed: 0,
+  lyricSyncMs: 0,
   timing: IDLE_TIMING,
 };
 
@@ -535,6 +547,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     if (!services) return;
     scanAbort = new AbortController();
     currentSource = source;
+    let lyricSyncMs = 0;
     if (handle) await services.storage.saveHandle(MUSIC_SOURCE_ID, handle);
 
     scanRunId += 1;
@@ -586,6 +599,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         elapsedMs: stats.elapsedMs,
         bytesRead: stats.bytesRead,
         removed: stats.removed,
+        lyricSyncMs,
         timing: stats.timing,
       },
     });
@@ -605,11 +619,24 @@ export const useAppStore = create<AppStore>()((set, get) => {
       );
     }
 
-    // 歌词：把目录里的 .lrc 认领到曲目上（用户导入/粘贴的歌词不会被覆盖）
+    // 歌词：把目录里的 .lrc 认领到曲目上（用户导入/粘贴的歌词不会被覆盖）。
+    // 这一步仍然算"扫描进行中"，否则界面与自动化脚本会以为已经就绪。
+    set({ scan: { ...get().scan, active: true, phase: 'lyrics' } });
+    const lyricStart = Date.now();
     const lyricStats = await syncLyrics({
       storage: services.storage,
       source,
       tracks: result.tracks,
+    });
+    lyricSyncMs = Date.now() - lyricStart;
+    set({
+      scan: {
+        ...get().scan,
+        active: false,
+        phase: stats.aborted ? 'aborted' : 'done',
+        lyricSyncMs,
+        lyricStats,
+      },
     });
     invalidateLyrics();
     if (lyricStats.claimed + lyricStats.updated > 0 || lyricStats.unmatched + lyricStats.ambiguous > 0) {
@@ -1006,4 +1033,9 @@ export function readLiveProgress(): { positionSec: number; durationSec: number }
 /** 自检与调试用：拿到引擎正在使用的 `<audio>` 元素（它不在 DOM 树里）。 */
 export function getAudioElement(): HTMLAudioElement | undefined {
   return engine?.element;
+}
+
+/** 自检与调试用：当前曲库来源（用来确认浏览器到底把哪些文件交进来了）。 */
+export function getActiveSource(): BrowserMusicSource | undefined {
+  return currentSource;
 }
