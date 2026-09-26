@@ -7,6 +7,7 @@
 import { useEffect, useRef } from 'react';
 import { formatTime } from '../core/format.js';
 import { getServices } from './services.js';
+import { LyricsPanel } from './LyricsPanel.js';
 import { MODE_TEXT, readLiveProgress, useAppStore } from './store.js';
 import {
   MuteIcon,
@@ -20,6 +21,7 @@ import {
   ShuffleIcon,
   VolumeIcon,
   CloseIcon,
+  LyricsIcon,
 } from './Icons.js';
 
 function ModeIcon({ mode }: { mode: keyof typeof MODE_TEXT }) {
@@ -168,7 +170,6 @@ export function PlayerBar() {
   const mode = useAppStore((state) => state.mode);
   const volume = useAppStore((state) => state.volume);
   const muted = useAppStore((state) => state.muted);
-  const queueOpen = useAppStore((state) => state.queueOpen);
 
   const togglePlay = useAppStore((state) => state.togglePlay);
   const next = useAppStore((state) => state.next);
@@ -177,6 +178,8 @@ export function PlayerBar() {
   const setVolume = useAppStore((state) => state.setVolume);
   const toggleMute = useAppStore((state) => state.toggleMute);
   const toggleQueue = useAppStore((state) => state.toggleQueue);
+  const toggleLyrics = useAppStore((state) => state.toggleLyrics);
+  const drawer = useAppStore((state) => state.drawer);
 
   return (
     <footer className="player">
@@ -209,11 +212,18 @@ export function PlayerBar() {
             <NextIcon />
           </button>
           <button
-            className={`btn-icon${queueOpen ? ' btn-on' : ''}`}
+            className={`btn-icon${drawer === 'queue' ? ' btn-on' : ''}`}
             onClick={toggleQueue}
             title="播放队列"
           >
             <QueueIcon />
+          </button>
+          <button
+            className={`btn-icon${drawer === 'lyrics' ? ' btn-on' : ''}`}
+            onClick={toggleLyrics}
+            title="歌词"
+          >
+            <LyricsIcon />
           </button>
         </div>
         <Progress />
@@ -238,34 +248,68 @@ export function PlayerBar() {
   );
 }
 
-export function QueueDrawer() {
-  const open = useAppStore((state) => state.queueOpen);
+/**
+ * 右抽屉：队列与歌词共用一个抽屉，用标签页切换。
+ *
+ * 这样不必为歌词再占一块版面（窗口宽度有限），也不用改主区布局。
+ */
+export function Drawer() {
+  const drawer = useAppStore((state) => state.drawer);
+  const toggleQueue = useAppStore((state) => state.toggleQueue);
+  const toggleLyrics = useAppStore((state) => state.toggleLyrics);
+
+  if (drawer === 'none') return null;
+
+  const close = (): void => {
+    if (drawer === 'queue') toggleQueue();
+    else toggleLyrics();
+  };
+
+  return (
+    <aside className="drawer">
+      <header className="drawer-head">
+        <div className="drawer-tabs">
+          <button
+            className={`drawer-tab${drawer === 'queue' ? ' drawer-tab-active' : ''}`}
+            onClick={() => drawer !== 'queue' && toggleQueue()}
+          >
+            播放队列
+          </button>
+          <button
+            className={`drawer-tab${drawer === 'lyrics' ? ' drawer-tab-active' : ''}`}
+            onClick={() => drawer !== 'lyrics' && toggleLyrics()}
+          >
+            歌词
+          </button>
+        </div>
+        <button className="btn-icon" onClick={close} title="关闭">
+          <CloseIcon />
+        </button>
+      </header>
+
+      {drawer === 'queue' ? <QueueList /> : <LyricsPanel />}
+    </aside>
+  );
+}
+
+function QueueList() {
   const queue = useAppStore((state) => state.queue);
   const currentIndex = useAppStore((state) => state.currentIndex);
   const tracks = useAppStore((state) => state.tracks);
   const jumpToQueue = useAppStore((state) => state.jumpToQueue);
   const removeFromQueue = useAppStore((state) => state.removeFromQueue);
   const clearQueue = useAppStore((state) => state.clearQueue);
-  const toggleQueue = useAppStore((state) => state.toggleQueue);
-
-  if (!open) return null;
 
   const byPath = new Map(tracks.map((track) => [track.path, track]));
 
   return (
-    <aside className="queue">
-      <header className="queue-head">
-        <span>播放队列（{queue.length}）</span>
-        <div className="queue-actions">
-          <button className="btn btn-quiet" onClick={clearQueue} disabled={queue.length === 0}>
-            清空
-          </button>
-          <button className="btn-icon" onClick={toggleQueue} title="关闭">
-            <CloseIcon />
-          </button>
-        </div>
-      </header>
-
+    <div className="queue">
+      <div className="queue-actions">
+        <span className="queue-count">{queue.length} 首</span>
+        <button className="btn btn-quiet" onClick={clearQueue} disabled={queue.length === 0}>
+          清空
+        </button>
+      </div>
       <div className="queue-list">
         {queue.length === 0 && <p className="queue-empty">队列是空的，双击曲目即可开始播放。</p>}
         {queue.map((path, index) => {
@@ -293,6 +337,6 @@ export function QueueDrawer() {
           );
         })}
       </div>
-    </aside>
+    </div>
   );
 }

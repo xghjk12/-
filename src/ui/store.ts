@@ -34,14 +34,18 @@ import {
   updatePositionState,
 } from '../platform/mediaSession.js';
 import { scanLibrary } from '../platform/scanner.js';
+import { syncLyrics } from '../platform/lyricSync.js';
 import type { PlaybackState } from '../platform/storage.js';
 import { createPlaybackController } from './playback.js';
 import type { PlaybackController, PlaybackSnapshot } from './playback.js';
+import { invalidateLyrics } from './lyrics.js';
 import { getServices } from './services.js';
 import type { Services } from './services.js';
 
 export type LibraryView = 'all' | 'artist' | 'album' | 'recent' | 'played' | 'diagnostics';
 export type NoticeKind = 'info' | 'warn' | 'error';
+/** 右抽屉的两个标签页。 */
+export type DrawerTab = 'queue' | 'lyrics';
 
 /** 播放历史的条数上限：够用又不会把状态记录撑大。 */
 export const RECENT_LIMIT = 200;
@@ -143,7 +147,10 @@ export interface AppState {
   volume: number;
   muted: boolean;
   durationSec: number;
-  queueOpen: boolean;
+  /** 右抽屉：关闭 / 队列 / 歌词。 */
+  drawer: 'none' | DrawerTab;
+  /** 歌词搜索地址模板；默认空（不内置任何具体站点）。 */
+  lyricSearchTemplate: string;
 
   /** 上次播放到的曲目与进度（只在切歌 / 暂停时更新），用于「继续上次播放」。 */
   resumePath?: string;
@@ -178,6 +185,15 @@ export interface AppActions {
   toggleMute(): void;
   seek(positionSec: number): void;
   toggleQueue(): void;
+  toggleLyrics(): void;
+  /** 写入歌词：导入文件（`import`）或粘贴文本（`paste`）。 */
+  saveLyrics(path: string, text: string, source: 'import' | 'paste'): Promise<void>;
+  removeLyrics(path: string): Promise<void>;
+  /** 微调时间轴偏移；正值表示歌词提前出现。 */
+  nudgeLyricOffset(path: string, deltaSec: number): Promise<void>;
+  setLyricSearchTemplate(template: string): Promise<void>;
+  /** 手动触发一次"只找歌词"，用于把刚下载的 .lrc 认领进来。 */
+  rescanLyrics(): Promise<void>;
   removeFromQueue(index: number): void;
   clearQueue(): void;
   jumpToQueue(index: number): Promise<void>;
@@ -228,7 +244,8 @@ const INITIAL: AppState = {
   volume: 0.8,
   muted: false,
   durationSec: 0,
-  queueOpen: false,
+  drawer: 'none',
+  lyricSearchTemplate: '',
   resumePath: undefined,
   resumePositionSec: 0,
   notices: [],
@@ -588,6 +605,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
       );
     }
 
+    // 歌词：把目录里的 .lrc 认领到曲目上（用户导入/粘贴的歌词不会被覆盖）
+    const lyricStats = await syncLyrics({
+      storage: services.storage,
+      source,
+      tracks: result.tracks,
+    });
+    invalidateLyrics();
+    if (lyricStats.claimed + lyricStats.updated > 0 || lyricStats.unmatched + lyricStats.ambiguous > 0) {
+      const missed = lyricStats.unmatched + lyricStats.ambiguous;
+      pushNotice(
+        `歌词：认领 ${lyricStats.claimed + lyricStats.updated} 首` +
+          (missed > 0 ? `，${missed} 个文件没匹配上（可在歌词面板手动导入）` : ''),
+      );
+    }
+
     await restorePlayback();
   }
 
@@ -623,10 +655,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
       // 于是什么都不做、界面永远停在未就绪。
       booting ??= (async () => {
         services = await getServices();
-        const [saved, cached, handle] = await Promise.all([
+        const [saved, cached, handle, settings] = await Promise.all([
           services.storage.readState(),
           services.storage.listTracks(),
           services.storage.loadHandle(MUSIC_SOURCE_ID),
+          services.storage.readSettings(),
         ]);
 
         // 旧版本缓存里的曲目没有检索键（没有拼音首字母）：在内存里补算一次，
@@ -660,6 +693,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           resumePath: saved?.trackPath,
           resumePositionSec: saved?.positionSec ?? 0,
           recentPaths: saved?.recentPaths ?? [],
+          lyricSearchTemplate: settings?.lyricSearchTemplate ?? '',
           canRestore: Boolean(handle),
         });
 
@@ -856,7 +890,72 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     toggleQueue() {
-      set({ queueOpen: !get().queueOpen });
+      set({ drawer: get().drawer === 'queue' ? 'none' : 'queue' });
+    },
+
+    toggleLyrics() {
+      set({ drawer: get().drawer === 'lyrics' ? 'none' : 'lyrics' });
+    },
+
+    async saveLyrics(path, text, source) {
+      if (!services) await get().boot();
+      const existing = await services!.storage.getLyrics(path);
+      await services!.storage.putLyrics([
+        {
+          path,
+          text,
+          source,
+          // 导入/粘贴的来源要清掉 sidecar 关联，否则下次扫描会以为这是派生记录
+          userOffsetSec: existing?.userOffsetSec ?? 0,
+          updatedAt: Date.now(),
+        },
+      ]);
+      invalidateLyrics(path);
+      const title = get().tracks.find((track) => track.path === path)?.title ?? path;
+      pushNotice(`${source === 'import' ? '已导入' : '已粘贴'}歌词：${title}`);
+    },
+
+    async removeLyrics(path) {
+      if (!services) await get().boot();
+      await services!.storage.deleteLyrics([path]);
+      invalidateLyrics(path);
+      pushNotice('已移除歌词（下次扫描会重新认领同名 .lrc）');
+    },
+
+    async nudgeLyricOffset(path, deltaSec) {
+      if (!services) await get().boot();
+      const record = await services!.storage.getLyrics(path);
+      if (!record) return;
+      const next = Math.round((record.userOffsetSec + deltaSec) * 100) / 100;
+      await services!.storage.putLyrics([{ ...record, userOffsetSec: next, updatedAt: Date.now() }]);
+      invalidateLyrics(path);
+    },
+
+    async setLyricSearchTemplate(template) {
+      if (!services) await get().boot();
+      const trimmed = template.trim();
+      set({ lyricSearchTemplate: trimmed });
+      await services!.storage.writeSettings({ lyricSearchTemplate: trimmed });
+      pushNotice(trimmed ? '已保存歌词搜索地址模板' : '已清空歌词搜索地址模板');
+    },
+
+    async rescanLyrics() {
+      if (!services || !currentSource) {
+        pushNotice('还没有曲库来源，请先选择音乐文件夹', 'warn');
+        return;
+      }
+      set({ scan: { ...IDLE_SCAN, active: true, phase: 'listing' } });
+      const stats = await syncLyrics({
+        storage: services.storage,
+        source: currentSource,
+        tracks: get().tracks,
+      });
+      set({ scan: IDLE_SCAN });
+      invalidateLyrics();
+      pushNotice(
+        `歌词扫描：新认领 ${stats.claimed}、更新 ${stats.updated}、未变化 ${stats.unchanged}` +
+          `${stats.unmatched + stats.ambiguous > 0 ? `，${stats.unmatched + stats.ambiguous} 个文件没匹配上` : ''}`,
+      );
     },
 
     removeFromQueue(index) {

@@ -131,6 +131,9 @@ try {
     }
   }
 
+  // 结果已经读进内存，把面板收起来：它是固定在右上角的浮层，会挡住右抽屉里的点击
+  await page.evaluate(() => document.getElementById('selfTestResult')?.remove());
+
   console.log('\n== 4/5 完整链路：导入 → 入库 → 列表 → 播放 ==');
   const scanned = await page.evaluate(async () => {
     const count = await window.__qingyinTest.loadFixtureLibrary();
@@ -277,6 +280,79 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.row').length >= 4, undefined, {
     timeout: 10_000,
   });
+
+  // ---- 歌词：自动认领 → 面板高亮 → 点击跳转 ----
+  console.log('\n== 4d 歌词 ==');
+
+  const claimed = await page.evaluate(async () => {
+    const record = await window.__qingyinTest.readLyrics('plain.mp3');
+    return record ? { source: record.source, lyricPath: record.lyricPath, text: record.text } : null;
+  });
+  console.log(
+    `   自动认领：${claimed ? `${claimed.lyricPath}（${claimed.source}）` : '没有认领到 plain.lrc'}`,
+  );
+  if (!claimed) problems.push('同名的 plain.lrc 没有被自动认领');
+  else if (claimed.source !== 'sidecar' || !claimed.text.includes('第二句歌词')) {
+    problems.push(`认领的歌词内容不对：${claimed.text.slice(0, 40)}`);
+  }
+
+  // 当前曲目是上一步的双击结果（plain.mp3），打开歌词标签页
+  await page.click('button[title="歌词"]');
+  await page.waitForSelector('.lyric-line', { timeout: 10_000 });
+  const lyricLines = await page.evaluate(() =>
+    [...document.querySelectorAll('.lyric-line')].map((node) => node.textContent?.trim() ?? ''),
+  );
+  console.log(`   歌词面板：${lyricLines.length} 行（${lyricLines.join(' / ')}）`);
+  if (lyricLines.length !== 3) problems.push(`歌词行数不对：${lyricLines.length}`);
+
+  // 跳到 0.7s：按 fixture 的时间戳，应该高亮第 2 句
+  await page.evaluate(async () => {
+    await window.__qingyinTest.seekAndFlush(0.7);
+  });
+  await page.waitForFunction(
+    () => document.querySelector('.lyric-active')?.textContent?.includes('第二句'),
+    undefined,
+    { timeout: 10_000 },
+  );
+  const highlighted = await page.evaluate(
+    () => document.querySelector('.lyric-active')?.textContent?.trim() ?? '',
+  );
+  console.log(`   0.7s 处高亮：「${highlighted}」`);
+  if (!highlighted.includes('第二句')) problems.push(`当前行高亮不对：${highlighted}`);
+
+  // 点击第 3 句应该跳到 0.8s
+  await page.locator('.lyric-line', { hasText: '第三句歌词' }).click();
+  await page.waitForFunction(
+    () => window.__qingyinTest.positionSec() >= 0.75,
+    undefined,
+    { timeout: 10_000 },
+  );
+  const afterClick = await page.evaluate(() => window.__qingyinTest.positionSec());
+  console.log(`   点击第 3 句后进度：${afterClick.toFixed(2)}s`);
+  if (afterClick < 0.75) problems.push('点击歌词行没有跳转');
+
+  // 偏移微调：按钮存在且能改变偏移显示
+  const offsetBefore = await page.evaluate(
+    () => document.querySelector('.lyrics-offset')?.textContent?.trim() ?? '',
+  );
+  await page.click('.lyrics-offset button:has-text("提早 0.5s")');
+  await page.waitForTimeout(200);
+  const offsetAfter = await page.evaluate(
+    () => document.querySelector('.lyrics-offset')?.textContent?.trim() ?? '',
+  );
+  console.log(`   偏移微调：「${offsetBefore}」→「${offsetAfter}」`);
+  if (offsetBefore === offsetAfter) problems.push('偏移微调按钮没有生效');
+  // 调回去，别影响后面的状态持久化断言
+  await page.click('.lyrics-offset button:has-text("归零")');
+  await page.waitForTimeout(200);
+
+  // 迷你歌词：播放条上方应该显示当前这句
+  const mini = await page.evaluate(() => document.querySelector('.minilyric-text')?.textContent ?? '');
+  console.log(`   迷你歌词：「${mini}」`);
+  if (!mini) problems.push('播放条上没有显示迷你歌词');
+
+  await page.keyboard.press('y'); // 关掉抽屉，恢复版面
+  await page.waitForTimeout(200);
 
   // ---- 增量缓存：同一批文件再导入一次，必须全部命中（真实 IndexedDB 的命中路径）----
   console.log('\n== 4b 增量缓存与状态持久化 ==');

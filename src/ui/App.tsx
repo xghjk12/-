@@ -13,7 +13,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { formatDuration } from '../core/format.js';
 import { TrackTable } from './TrackTable.js';
 import { Sidebar } from './Sidebar.js';
-import { PlayerBar, QueueDrawer } from './PlayerBar.js';
+import { Drawer, PlayerBar } from './PlayerBar.js';
+import { MiniLyric } from './LyricsPanel.js';
 import {
   diagnoseTrack,
   entryTracks,
@@ -263,6 +264,9 @@ export function App() {
         case 'q':
           store.toggleQueue();
           break;
+        case 'y':
+          store.toggleLyrics();
+          break;
         default:
           break;
       }
@@ -321,12 +325,16 @@ export function App() {
         )}
 
         <footer className="main-foot">
-          <span>空格 播放/暂停 · ←/→ 快退快进 5s · ↑/↓ 切歌 · J/K/L 后退/暂停/前进 · +/− 音量 · M 静音 · Q 队列 · Ctrl+F 搜索</span>
+          <span>
+            空格 播放/暂停 · ←/→ 快退快进 5s · ↑/↓ 切歌 · J/K/L 后退/暂停/前进 · +/− 音量 ·
+            M 静音 · Q 队列 · Y 歌词 · Ctrl+F 搜索
+          </span>
           <span>状态自动保存在本地（IndexedDB）</span>
         </footer>
       </main>
 
-      <QueueDrawer />
+      <MiniLyric />
+      <Drawer />
       <PlayerBar />
       <Notices />
     </div>

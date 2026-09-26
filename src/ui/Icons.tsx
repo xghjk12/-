@@ -169,3 +169,11 @@ export function WarnIcon({ size = 15, className }: IconProps) {
     </svg>
   );
 }
+
+export function LyricsIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...base(size, className)} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 6h11M4 10h16M4 14h16M4 18h9" />
+    </svg>
+  );
+}

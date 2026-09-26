@@ -15,6 +15,7 @@ import { DEFAULT_PROBE_BYTES, metadataRegionEnd } from '../core/metadataRegion.j
 import { resolveNextIndex, resolvePrevIndex, shuffleOrder } from '../core/queue.js';
 import { compareText } from '../core/sort.js';
 import { fixGbkMojibake } from '../core/tagEncoding.js';
+import { currentLineIndex, isLyricFileName, parseLyrics } from '../core/lyrics.js';
 import type { Track } from '../core/track.js';
 import { blobByteSource } from '../platform/byteSource.js';
 import { readMetadata } from '../platform/metadata.js';
@@ -22,6 +23,7 @@ import { getAudioElement, useAppStore } from './store.js';
 import { getServices } from './services.js';
 
 import apeUrl from '../../tests/fixtures/fake.ape?url';
+import plainLrcUrl from '../../tests/fixtures/plain.lrc?url';
 import flacUrl from '../../tests/fixtures/sample-cn.flac?url';
 import mp3Url from '../../tests/fixtures/sample-cn.mp3?url';
 import plainUrl from '../../tests/fixtures/plain.mp3?url';
@@ -60,6 +62,20 @@ const FIXTURES: Array<{ name: string; url: string }> = [
  * 设成当下时刻——那样每次导入都会被判成"文件变了"，增量缓存的命中路径就永远测不到。
  */
 const FIXTURE_MODIFIED_AT = Date.UTC(2026, 0, 1, 0, 0, 0);
+
+/**
+ * 只用于"导入曲库"这一步的歌词样本。
+ *
+ * 单独一个列表是因为 `FIXTURES` 里每一项都会被当作音频去解析，而自检的检查项是按
+ * 「第 1 个是 flac、第 2 个是 mp3…」取用的——把 .lrc 混进去会打乱这些下标。
+ *
+ * `plain.lrc` 与音频 `plain.mp3` 同名（去扩展名后都是 `plain`），所以会被自动认领；
+ * 内置的两首「青花瓷」是同一首歌的两种格式，任何按标题匹配的歌词都会歧义，
+ * 那是刻意留的"歧义不猜"用例（有单测覆盖）。
+ */
+const LYRIC_FIXTURES: Array<{ name: string; url: string }> = [
+  { name: 'plain.lrc', url: plainLrcUrl },
+];
 
 /** 取内置样本字节 + 解析结果（走的是和产品完全相同的浏览器解析路径）。 */
 async function inspectFixture(name: string, url: string): Promise<FixtureResult> {
@@ -222,6 +238,14 @@ async function collect(): Promise<Check[]> {
     { label: '时长格式化', actual: formatTime(125), expected: '2:05' },
   );
 
+  // 歌词解析与当前行定位（网页里也要能跑）
+  const parsedLyrics = parseLyrics('[00:00.00]一\n[00:00.40]二\n[00:00.80]三');
+  checks.push(
+    { label: '歌词解析：行数', actual: parsedLyrics.lines.length, expected: 3 },
+    { label: '歌词解析：当前行定位（0.7s → 第 2 句）', actual: currentLineIndex(parsedLyrics.lines, 0.7), expected: 1 },
+    { label: '歌词文件识别（.lrc）', actual: isLyricFileName('专辑/青花瓷.LRC'), expected: true },
+  );
+
   // 界面：外壳已挂载 + 虚拟化真的生效
   checks.push({
     label: '应用外壳已挂载',
@@ -249,7 +273,7 @@ function installTestHooks(): void {
     /** 把内置样本当作一个"文件夹"导入，走完整的扫描 → IndexedDB → 列表渲染链路。 */
     async loadFixtureLibrary(): Promise<number> {
       const files = await Promise.all(
-        FIXTURES.map(async ({ name, url }) => {
+        [...FIXTURES, ...LYRIC_FIXTURES].map(async ({ name, url }) => {
           const response = await fetch(url);
           return new File([await response.blob()], name, { lastModified: FIXTURE_MODIFIED_AT });
         }),
@@ -259,6 +283,8 @@ function installTestHooks(): void {
       await useAppStore.getState().useFileList(transfer.files);
       return useAppStore.getState().tracks.length;
     },
+    /** 读某首曲目已保存的歌词记录（验证自动认领/导入是否落库）。 */
+    readLyrics: async (path: string) => (await getServices()).storage.getLyrics(path),
     /** 本轮扫描的统计（命中 / 新解析 / 遍历耗时…），用于验证增量缓存真的生效。 */
     scan: () => useAppStore.getState().scan,
     /** 直接读 IndexedDB 里持久化的播放状态，验证"写进去的是真数据"。 */
@@ -289,7 +315,9 @@ function installTestHooks(): void {
         queueLength: state.queue.length,
         volume: state.volume,
         muted: state.muted,
-        queueOpen: state.queueOpen,
+        drawer: state.drawer,
+        queueOpen: state.drawer === 'queue',
+        lyricSearchTemplate: state.lyricSearchTemplate,
         resumePath: state.resumePath,
         resumePositionSec: state.resumePositionSec,
         recentPaths: state.recentPaths,

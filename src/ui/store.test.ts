@@ -72,7 +72,8 @@ beforeEach(() => {
     playing: false,
     volume: 0.8,
     muted: false,
-    queueOpen: false,
+    drawer: 'none',
+    lyricSearchTemplate: '',
     notices: [],
   });
 });
@@ -346,11 +347,89 @@ describe('store：播放模式与队列抽屉', () => {
     expect(seen).toEqual(['repeat-all', 'repeat-one', 'shuffle', 'sequence']);
   });
 
-  it('toggleQueue 开关队列抽屉', () => {
+  it('toggleQueue / toggleLyrics 共用右抽屉，各自能开关', () => {
     useAppStore.getState().toggleQueue();
-    expect(useAppStore.getState().queueOpen).toBe(true);
+    expect(useAppStore.getState().drawer).toBe('queue');
+
+    // 打开歌词会切成歌词标签页，而不是同时开两个
+    useAppStore.getState().toggleLyrics();
+    expect(useAppStore.getState().drawer).toBe('lyrics');
+
+    useAppStore.getState().toggleLyrics();
+    expect(useAppStore.getState().drawer).toBe('none');
+
     useAppStore.getState().toggleQueue();
-    expect(useAppStore.getState().queueOpen).toBe(false);
+    useAppStore.getState().toggleQueue();
+    expect(useAppStore.getState().drawer).toBe('none');
+  });
+});
+
+describe('store：歌词动作', () => {
+  it('保存歌词后能从存储读出来，并带上来源', async () => {
+    await useAppStore.getState().boot();
+    const services = await import('./services.js').then((module) => module.getServices());
+
+    await useAppStore.getState().saveLyrics('a.flac', '[00:01.00]词', 'paste');
+
+    const record = await services.storage.getLyrics('a.flac');
+    expect(record).toMatchObject({ text: '[00:01.00]词', source: 'paste', userOffsetSec: 0 });
+  });
+
+  it('再次保存会覆盖，但保留用户已调好的偏移', async () => {
+    await useAppStore.getState().boot();
+    const services = await import('./services.js').then((module) => module.getServices());
+
+    await useAppStore.getState().saveLyrics('a.flac', '第一版', 'import');
+    await useAppStore.getState().nudgeLyricOffset('a.flac', 0.5);
+    await useAppStore.getState().saveLyrics('a.flac', '第二版', 'paste');
+
+    const record = await services.storage.getLyrics('a.flac');
+    expect(record?.text).toBe('第二版');
+    expect(record?.userOffsetSec).toBe(0.5);
+    // 换成用户来源之后不该再留着 sidecar 关联
+    expect(record?.lyricPath).toBeUndefined();
+  });
+
+  it('偏移微调累加并四舍五入到两位小数', async () => {
+    await useAppStore.getState().boot();
+    const services = await import('./services.js').then((module) => module.getServices());
+
+    await useAppStore.getState().saveLyrics('a.flac', '词', 'paste');
+    await useAppStore.getState().nudgeLyricOffset('a.flac', 0.5);
+    await useAppStore.getState().nudgeLyricOffset('a.flac', 0.5);
+    await useAppStore.getState().nudgeLyricOffset('a.flac', -0.25);
+
+    expect((await services.storage.getLyrics('a.flac'))?.userOffsetSec).toBe(0.75);
+  });
+
+  it('移除歌词后就查不到了', async () => {
+    await useAppStore.getState().boot();
+    const services = await import('./services.js').then((module) => module.getServices());
+
+    await useAppStore.getState().saveLyrics('a.flac', '词', 'paste');
+    await useAppStore.getState().removeLyrics('a.flac');
+
+    expect(await services.storage.getLyrics('a.flac')).toBeUndefined();
+  });
+
+  it('保存搜索地址模板会持久化（默认是空的，不内置任何站点）', async () => {
+    await useAppStore.getState().boot();
+    const services = await import('./services.js').then((module) => module.getServices());
+    expect(useAppStore.getState().lyricSearchTemplate).toBe('');
+
+    await useAppStore.getState().setLyricSearchTemplate('  https://example.com/?q={keyword}  ');
+
+    expect(useAppStore.getState().lyricSearchTemplate).toBe('https://example.com/?q={keyword}');
+    expect((await services.storage.readSettings())?.lyricSearchTemplate).toBe(
+      'https://example.com/?q={keyword}',
+    );
+  });
+
+  it('没有曲库来源时重新扫描歌词只给提示，不抛异常', async () => {
+    await useAppStore.getState().boot();
+    await useAppStore.getState().rescanLyrics();
+
+    expect(useAppStore.getState().notices.at(-1)?.message).toContain('还没有曲库来源');
   });
 });
 
