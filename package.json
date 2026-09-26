@@ -12,6 +12,7 @@
     "build:m0": "vite build",
     "dev:m0": "vite --port 5174 --strictPort",
     "check:bundle": "node scripts/check-browser-bundle.mjs",
+    "check:ui": "node scripts/check-ui.mjs",
     "verify": "pnpm typecheck && pnpm test && pnpm check:bundle"
   },
   "dependencies": {
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
+    "playwright-core": "^1.63.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.1",
     "vitest": "^5.0.2"

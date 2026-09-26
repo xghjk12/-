@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-m0/
 .tmp-m0/
+artifacts/
 *.log
 .DS_Store
 
