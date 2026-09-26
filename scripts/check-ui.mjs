@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 /**
- * 最小界面冒烟：用**本机已装的 Edge（Chromium 内核）**驱动浏览器，跑一遍 M0 验证页的内置自检。
+ * 界面冒烟：用**本机已装的 Edge（Chromium 内核）**驱动真实浏览器，跑一遍产品本身。
  *
  * 为什么用 Edge 而不是让 Playwright 下载 Chromium：本机已有 Edge，而 `playwright-core`
  * 本身不下载浏览器，所以这条路零下载。
  *
- * 也因此它**不进 `pnpm verify`**：它依赖「本机装了 Edge」，属于开发机上的辅助验证，
- * 不是可移植的验证链。可移植的那部分仍然是 typecheck + test + check:bundle。
+ * 它**不进 `pnpm verify`**：它依赖「本机装了 Edge」，属于开发机上的辅助验证，
+ * 而 verify 要能在任何环境跑。可移植的那部分是 typecheck + test + check:bundle。
  *
- * 它验证的是自动化能覆盖的部分：
- *   - 页面能真正在浏览器里跑起来（不是只看源码推断）
- *   - 内置自检（浏览器里解析真实 flac/mp3）逐项通过
- *   - 没有控制台报错 / 未捕获异常
- *   - 留一张截图，供人（或 AI）肉眼确认版面
+ * 它覆盖的是自动化确实能覆盖的那一段：
+ *   1. 页面能真正在浏览器里跑起来，且没有控制台报错 / 未捕获异常
+ *   2. 内置自检逐项通过（真实 flac / mp3 在浏览器里解析；四种播放模式的推进；
+ *      500 首时虚拟化只渲染视口内的行）
+ *   3. 完整链路：内置样本 → 扫描入库（真写 IndexedDB）→ 列表渲染 → 双击播放
+ *      → 断言 `<audio>` 真的在推进（这是"真实出声"最接近的自动化替身）
+ *   4. 留一张截图，供人（或 AI）肉眼确认版面
  *
  * 用法：pnpm check:ui
  */
@@ -24,29 +26,35 @@ import path from 'node:path';
 import { chromium } from 'playwright-core';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const distDir = path.join(root, 'dist-m0');
+const distDir = path.join(root, 'dist');
 const shotDir = path.join(root, 'artifacts', 'ui');
 const viteBin = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
+  '.ico': 'image/x-icon',
   '.flac': 'audio/flac',
   '.mp3': 'audio/mpeg',
+  '.ape': 'application/octet-stream',
+  '.woff2': 'font/woff2',
 };
 
-console.log('== 1/4 构建产物 ==');
+console.log('== 1/5 构建产物 ==');
 execFileSync(process.execPath, [viteBin, 'build'], { cwd: root, stdio: 'inherit' });
 
-/** 只服务 dist-m0 下的文件，路径穿越直接拒绝。 */
+/** 只服务 dist 下的文件，路径穿越直接拒绝。 */
 function startStaticServer() {
   const server = createServer(async (request, response) => {
     const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
-    // 验证页没有 favicon，浏览器会自动请求一次；这不是页面缺陷，别让它污染控制台断言
     if (pathname === '/favicon.ico') {
       response.writeHead(204).end();
       return;
@@ -67,57 +75,133 @@ function startStaticServer() {
     }
   });
   return new Promise((resolve) => {
-    // 端口交给系统分配，避免和 dev server（5174）撞车
     server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
   });
 }
 
 const { server, port } = await startStaticServer();
-const url = `http://127.0.0.1:${port}/`;
-console.log(`== 2/4 启动浏览器（本机 Edge）==\n   ${url}`);
+const url = `http://127.0.0.1:${port}/?selftest=1`;
+console.log(`== 2/5 启动浏览器（本机 Edge）==\n   ${url}`);
 
 const problems = [];
 let browser;
-let result;
+const result = { selfCheck: null, playback: null, queue: null, screenshot: null, consoleErrors: [] };
 
 try {
   // channel 指向本机 Edge；playwright-core 不带浏览器，所以这里不会触发下载
-  browser = await chromium.launch({ channel: 'msedge', headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
+  browser = await chromium.launch({
+    channel: 'msedge',
+    headless: true,
+    // 允许无声播放，避免 headless 下自动播放策略把 play() 拒掉
+    args: ['--autoplay-policy=no-user-gesture-required'],
+  });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 
-  const consoleErrors = [];
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
-    // 带上资源地址，否则「Failed to load resource」这类报错无法定位
     const { url: resourceUrl } = message.location();
-    consoleErrors.push(resourceUrl ? `${message.text()} (${resourceUrl})` : message.text());
+    result.consoleErrors.push(resourceUrl ? `${message.text()} (${resourceUrl})` : message.text());
   });
-  page.on('pageerror', (error) => consoleErrors.push(`未捕获异常: ${error.message}`));
+  page.on('pageerror', (error) => result.consoleErrors.push(`未捕获异常: ${error.message}`));
   page.on('requestfailed', (request) =>
-    consoleErrors.push(`请求失败: ${request.url()} ${request.failure()?.errorText ?? ''}`),
+    result.consoleErrors.push(`请求失败: ${request.url()} ${request.failure()?.errorText ?? ''}`),
   );
 
   await page.goto(url, { waitUntil: 'load', timeout: 30_000 });
-  // 页面加载后会自动跑一次内置自检，等它渲染出结果表
-  await page.waitForSelector('#selfTestResult table', { timeout: 30_000 });
 
-  result = await page.evaluate(() => {
-    const heading = document.querySelector('#selfTestResult h2')?.textContent?.trim() ?? '';
-    // 第 0 行是表头，跳过
-    const rows = [...document.querySelectorAll('#selfTestResult table tr')]
-      .slice(1)
-      .map((row) => {
-        const cells = [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim());
-        return { label: cells[0], actual: cells[1], expected: cells[2], verdict: cells[3] };
-      });
-    return { heading, rows, log: document.querySelector('#log')?.textContent?.trim() ?? '' };
+  console.log('\n== 3/5 内置自检 ==');
+  await page.waitForSelector('#selfTestResult table', { timeout: 45_000 });
+  result.selfCheck = await page.evaluate(() => {
+    const panel = document.querySelector('#selfTestResult');
+    const heading = panel?.querySelector('h2')?.textContent?.trim() ?? '';
+    const rows = [...(panel?.querySelectorAll('table tr') ?? [])].slice(1).map((row) => {
+      const cells = [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim());
+      return { label: cells[0], actual: cells[1], expected: cells[2], verdict: cells[3] };
+    });
+    return { heading, rows, verdict: panel?.dataset.verdict };
   });
+  console.log(`   ${result.selfCheck.heading}`);
+  for (const row of result.selfCheck.rows) {
+    console.log(`   ${row.verdict === '通过' ? '✓' : '✗'} ${String(row.label).padEnd(30)} ${row.actual}`);
+  }
+  if (result.selfCheck.verdict !== 'pass') {
+    problems.push(`内置自检未全部通过：${result.selfCheck.heading}`);
+    for (const row of result.selfCheck.rows.filter((item) => item.verdict !== '通过')) {
+      problems.push(`自检失败项：${row.label}（实际 ${row.actual}，期望 ${row.expected}）`);
+    }
+  }
 
+  console.log('\n== 4/5 完整链路：导入 → 入库 → 列表 → 播放 ==');
+  const scanned = await page.evaluate(async () => {
+    const count = await window.__qingyinTest.loadFixtureLibrary();
+    return { count, paths: window.__qingyinTest.tracks() };
+  });
+  console.log(`   导入内置样本 ${scanned.count} 首：${scanned.paths.join('、')}`);
+  if (scanned.count < 4) problems.push(`内置样本没有全部入库（期望 4，实际 ${scanned.count}）`);
+
+  await page.waitForSelector('.row', { timeout: 15_000 });
+  const renderedRows = await page.locator('.row').count();
+
+  const flacIndex = scanned.paths.findIndex((item) => item.endsWith('.flac'));
+  if (flacIndex < 0) problems.push('内置样本里没有 flac，无法验证播放');
+  else await page.locator('.row').nth(flacIndex).dblclick();
+
+  // 真的在出声：<audio> 不再暂停，且 currentTime 在推进
+  let progressed = false;
+  try {
+    await page.waitForFunction(
+      () => !window.__qingyinTest.paused() && window.__qingyinTest.positionSec() > 0.05,
+      undefined,
+      { timeout: 15_000 },
+    );
+    progressed = true;
+  } catch {
+    progressed = false;
+  }
+
+  result.playback = await page.evaluate(() => ({
+    ...window.__qingyinTest.state(),
+    positionSec: window.__qingyinTest.positionSec(),
+    durationSec: window.__qingyinTest.durationSec(),
+    paused: window.__qingyinTest.paused(),
+    src: window.__qingyinTest.audioSrc(),
+    rows: document.querySelectorAll('.row').length,
+  }));
+
+  console.log(
+    `   列表渲染 ${renderedRows} 行；播放状态 paused=${result.playback.paused} ` +
+      `position=${result.playback.positionSec.toFixed(2)}s duration=${result.playback.durationSec.toFixed(1)}s`,
+  );
+  console.log(`   音源：${result.playback.src.slice(0, 48)}…`);
+
+  if (!progressed) {
+    problems.push('双击曲目后音频没有推进（可能是自动播放策略或对象 URL 失败）');
+  }
+  if (!result.playback.src.startsWith('blob:')) {
+    problems.push(`音频没有走对象 URL（实际 ${result.playback.src.slice(0, 32)}）`);
+  }
+  if (result.playback.durationSec < 1) {
+    problems.push(`读到的时长异常：${result.playback.durationSec}`);
+  }
+
+  // 队列抽屉
+  await page.click('button[title="播放队列"]');
+  await page.waitForSelector('.queue', { timeout: 5_000 });
+  result.queue = await page.evaluate(() => ({
+    open: window.__qingyinTest.state().queueOpen,
+    items: document.querySelectorAll('.queue-item').length,
+  }));
+  console.log(`   队列抽屉：${result.queue.items} 项`);
+  if (result.queue.items < 1) problems.push('播放队列是空的（双击后应当至少有一项）');
+
+  // 截图前收起自检面板，留一张干净的界面图
+  await page.evaluate(() => document.getElementById('selfTestResult')?.remove());
   await mkdir(shotDir, { recursive: true });
-  const shotPath = path.join(shotDir, 'm0-selfcheck.png');
-  await page.screenshot({ path: shotPath, fullPage: true });
+
+  const shotPath = path.join(shotDir, 'app.png');
+  await page.screenshot({ path: shotPath });
   result.screenshot = path.relative(root, shotPath);
-  result.consoleErrors = consoleErrors;
+  console.log(`\n   截图：${result.screenshot}`);
 } catch (error) {
   problems.push(`浏览器冒烟未跑完：${error instanceof Error ? error.message : String(error)}`);
 } finally {
@@ -125,34 +209,11 @@ try {
   server.close();
 }
 
-console.log('\n== 3/4 页面自检结果 ==');
-if (result) {
-  console.log(`   ${result.heading}`);
-  for (const row of result.rows) {
-    const mark = row.verdict === '通过' ? '✓' : '✗';
-    console.log(`   ${mark} ${row.label.padEnd(22)} 实际 ${row.actual}  期望 ${row.expected}`);
-  }
-  console.log(`\n   页面日志：\n${result.log.split('\n').map((line) => `     ${line}`).join('\n')}`);
-  console.log(`\n   截图：${result.screenshot}`);
-
-  if (!result.heading.includes('全部通过')) {
-    problems.push(`页面自检未全部通过：${result.heading}`);
-  }
-  const failed = result.rows.filter((row) => row.verdict !== '通过');
-  if (failed.length > 0) {
-    problems.push(`失败项：${failed.map((row) => row.label).join('、')}`);
-  }
-  if (result.consoleErrors.length > 0) {
-    problems.push(`控制台报错 ${result.consoleErrors.length} 条`);
-  }
+console.log('\n== 5/5 控制台 ==');
+if (result.consoleErrors.length > 0) {
+  for (const line of result.consoleErrors.slice(0, 10)) console.log(`   ✗ ${line}`);
+  problems.push(`控制台报错 ${result.consoleErrors.length} 条`);
 } else {
-  console.log('   （没有拿到结果，见上面的失败原因）');
-}
-
-console.log('\n== 4/4 控制台 ==');
-if (result?.consoleErrors.length) {
-  for (const line of result.consoleErrors) console.log(`   ✗ ${line}`);
-} else if (result) {
   console.log('   没有控制台报错，也没有未捕获异常。');
 }
 
