@@ -358,7 +358,9 @@ export function MiniLyric() {
     return () => cancelAnimationFrame(frame);
   }, [lyrics, offset]);
 
-  if (!currentPath || !lyrics) return null;
+  // 有正在播放/上次播放的曲目就渲染：**没有歌词时也要显示**，
+  // 否则"还没有歌词"的用户看不到任何入口（这条坑是真实使用反馈里暴露的）
+  if (!currentPath) return null;
 
   return (
     <button className="minilyric" onClick={toggleLyrics} title="打开歌词面板">
@@ -366,7 +368,7 @@ export function MiniLyric() {
         <span className="minilyric-text">{text}</span>
       ) : (
         <span className="minilyric-idle">
-          <WarnIcon size={12} /> 暂无歌词，点击查看歌词面板
+          <WarnIcon size={12} /> 还没有歌词，点这里添加
         </span>
       )}
     </button>

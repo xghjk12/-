@@ -33,6 +33,8 @@ export function Sidebar() {
   const persistent = useAppStore((state) => state.persistent);
   const scanning = useAppStore((state) => state.scan.active);
   const recentPaths = useAppStore((state) => state.recentPaths);
+  const drawer = useAppStore((state) => state.drawer);
+  const toggleLyrics = useAppStore((state) => state.toggleLyrics);
 
   const pickDirectory = useAppStore((state) => state.pickDirectory);
   const restoreLibrary = useAppStore((state) => state.restoreLibrary);
@@ -105,6 +107,19 @@ export function Sidebar() {
             <span className="nav-count">{counts[item.key]}</span>
           </button>
         ))}
+        {/*
+          歌词单独一项：它不是"视图"（不改变列表），而是打开右侧面板。
+          放在这里是因为抽屉里的标签页与播放条上的图标都不够显眼——
+          真实使用反馈就是"没找到歌词的入口"。
+        */}
+        <button
+          className={`nav-item${drawer === 'lyrics' ? ' nav-active' : ''}`}
+          onClick={toggleLyrics}
+          title="打开歌词面板（也可以按 Y）"
+        >
+          <span>歌词</span>
+          <span className="nav-count">{drawer === 'lyrics' ? '打开' : '→'}</span>
+        </button>
       </nav>
 
       <div className="sidebar-foot">

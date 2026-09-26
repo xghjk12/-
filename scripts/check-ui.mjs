@@ -281,9 +281,37 @@ try {
     timeout: 10_000,
   });
 
-  // ---- 歌词：自动认领 → 面板高亮 → 点击跳转 ----
+  // ---- 歌词：入口可见性 → 自动认领 → 面板高亮 → 点击跳转 ----
   console.log('\n== 4d 歌词 ==');
 
+  // 入口 1：侧栏的「歌词」（真实反馈里"没找到歌词的入口"，所以这条要钉死）
+  await page.click('button.nav-item:has-text("歌词")');
+  await page.waitForSelector('.drawer', { timeout: 10_000 });
+  const sidebarEntry = await page.evaluate(() => ({
+    tab: document.querySelector('.drawer-tab-active')?.textContent?.trim() ?? '',
+    empty: document.querySelector('.lyrics')?.textContent?.trim().slice(0, 30) ?? '',
+  }));
+  console.log(`   侧栏「歌词」入口：抽屉打开在「${sidebarEntry.tab}」标签页；${sidebarEntry.empty}…`);
+  if (sidebarEntry.tab !== '歌词') problems.push(`侧栏歌词入口没有切到歌词标签页（当前 ${sidebarEntry.tab}）`);
+
+  // flacIndex 在上面播放那一段已经算过了；这里只需要 plain.mp3 的位置
+  const plainIndex = scanned.paths.findIndex((item) => item.endsWith('plain.mp3'));
+
+  // 入口 2：没有歌词的曲目，迷你歌词也要出现（之前它在"没有歌词"时整个不渲染，
+  // 于是最显眼的入口恰好消失了）
+  await page.locator('.row').nth(flacIndex).dblclick();
+  await page.waitForFunction(
+    () => document.querySelector('.minilyric')?.textContent?.includes('还没有歌词'),
+    undefined,
+    { timeout: 15_000 },
+  );
+  const noLyricHint = await page.evaluate(
+    () => document.querySelector('.minilyric')?.textContent?.trim() ?? '',
+  );
+  console.log(`   无歌词曲目的迷你歌词：「${noLyricHint}」`);
+  if (!noLyricHint.includes('还没有歌词')) problems.push('没有歌词时迷你歌词入口没有出现');
+
+  // 自动认领：plain.mp3 与 plain.lrc 同名
   const claimed = await page.evaluate(async () => {
     const record = await window.__qingyinTest.readLyrics('plain.mp3');
     return record ? { source: record.source, lyricPath: record.lyricPath, text: record.text } : null;
@@ -296,9 +324,9 @@ try {
     problems.push(`认领的歌词内容不对：${claimed.text.slice(0, 40)}`);
   }
 
-  // 当前曲目是上一步的双击结果（plain.mp3），打开歌词标签页
-  await page.click('button[title="歌词"]');
-  await page.waitForSelector('.lyric-line', { timeout: 10_000 });
+  // 切到有歌词的那首，面板应该渲染出三行
+  await page.locator('.row').nth(plainIndex).dblclick();
+  await page.waitForSelector('.lyric-line', { timeout: 15_000 });
   const lyricLines = await page.evaluate(() =>
     [...document.querySelectorAll('.lyric-line')].map((node) => node.textContent?.trim() ?? ''),
   );
@@ -398,6 +426,9 @@ try {
   // ---- 刷新：列表必须纯靠缓存立刻回来，状态与进度一并恢复 ----
   await page.reload({ waitUntil: 'load', timeout: 30_000 });
   await page.waitForSelector('.row', { timeout: 15_000 });
+  // 等内置自检跑完再断言：它中间会临时塞 500 首合成曲目来验证虚拟化，
+  // 那个窗口里读到的是合成数据（不是缓存恢复的结果）
+  await page.waitForSelector('#selfTestResult[data-verdict]', { timeout: 30_000 });
   const afterReload = await page.evaluate(() => ({
     rows: document.querySelectorAll('.row').length,
     state: window.__qingyinTest.state(),

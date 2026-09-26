@@ -15,6 +15,7 @@ import { TrackTable } from './TrackTable.js';
 import { Sidebar } from './Sidebar.js';
 import { Drawer, PlayerBar } from './PlayerBar.js';
 import { MiniLyric } from './LyricsPanel.js';
+import { setupServiceWorker } from './pwa.js';
 import {
   diagnoseTrack,
   entryTracks,
@@ -161,6 +162,35 @@ function EmptyState() {
       <p className="empty-hint">
         没有 Chrome / Edge？用侧栏的「兼容模式选择文件夹」，但刷新页面后需要重新选择。
       </p>
+    </div>
+  );
+}
+
+/**
+ * 新版本提示条。
+ *
+ * PWA 的外壳被 Service Worker 缓存着，没有这条提示的话用户会一直停在旧构建上
+ * （真实反馈：以为功能没做，其实是页面没更新）。由用户点一下再刷新，
+ * 避免正在听歌时被强制刷新打断。
+ */
+function UpdateBar() {
+  const [ready, setReady] = useState(false);
+  const [handle, setHandle] = useState<ReturnType<typeof setupServiceWorker>>();
+
+  useEffect(() => {
+    const created = setupServiceWorker(() => setReady(true));
+    setHandle(created);
+    return () => created.dispose();
+  }, []);
+
+  if (!ready) return null;
+
+  return (
+    <div className="update-bar">
+      <span>有新版本可用</span>
+      <button className="btn btn-primary" onClick={() => handle?.update()}>
+        刷新到新版本
+      </button>
     </div>
   );
 }
@@ -339,6 +369,7 @@ export function App() {
       <MiniLyric />
       <Drawer />
       <PlayerBar />
+      <UpdateBar />
       <Notices />
     </div>
   );

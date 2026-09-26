@@ -21,7 +21,11 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'prompt'：新版本就绪时由界面提示用户刷新，而不是静默换掉外壳
+      // （静默更新会让用户一直停在旧构建上，而界面上没有任何提示）
+      registerType: 'prompt',
+      // 注册由 src/ui/pwa.ts 自己发起，别再注入一份 registerSW.js
+      injectRegister: null,
       includeAssets: ['favicon.svg'],
       manifest: {
         name: '轻音播放',
