@@ -97,18 +97,35 @@ try {
   });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 
+  // 在页面脚本之前挂一个监听：Chrome 在"站点可安装"时会派发 beforeinstallprompt，
+  // 它是有用的参考信号（但 headless 下通常不派发，所以只记录、不作为断言）
+  await page.addInitScript(() => {
+    window.__installPrompt = null;
+    window.addEventListener('beforeinstallprompt', () => {
+      window.__installPrompt = true;
+    });
+  });
+
+  /**
+   * 离线阶段会刻意让内置样本的 fetch 失败（音频样本不在预缓存里，见 vite.config.ts 的
+   * globIgnores），那几条报错是预期行为，不算缺陷。
+   */
+  let offlinePhase = false;
+
   page.on('console', (message) => {
-    if (message.type() !== 'error') return;
+    if (message.type() !== 'error' || offlinePhase) return;
     const { url: resourceUrl } = message.location();
     result.consoleErrors.push(resourceUrl ? `${message.text()} (${resourceUrl})` : message.text());
   });
-  page.on('pageerror', (error) => result.consoleErrors.push(`未捕获异常: ${error.message}`));
-  page.on('requestfailed', (request) =>
-    result.consoleErrors.push(`请求失败: ${request.url()} ${request.failure()?.errorText ?? ''}`),
-  );
+  page.on('pageerror', (error) => {
+    if (!offlinePhase) result.consoleErrors.push(`未捕获异常: ${error.message}`);
+  });
+  page.on('requestfailed', (request) => {
+    if (offlinePhase) return;
+    result.consoleErrors.push(`请求失败: ${request.url()} ${request.failure()?.errorText ?? ''}`);
+  });
 
   await page.goto(url, { waitUntil: 'load', timeout: 30_000 });
-
   console.log('\n== 3/5 内置自检 ==');
   await page.waitForSelector('#selfTestResult table', { timeout: 45_000 });
   result.selfCheck = await page.evaluate(() => {
@@ -460,6 +477,103 @@ try {
   }
 
   result.persistence = { persisted, afterReload };
+
+  // ---- PWA：安装前提（桌面图标依赖它）与离线可打开 ----
+  console.log('\n== 4e PWA：可安装与离线 ==');
+  const pwa = await page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const manifestHref = document.querySelector('link[rel="manifest"]')?.getAttribute('href');
+    let manifest = null;
+    const icons = [];
+    try {
+      manifest = manifestHref ? await (await fetch(manifestHref)).json() : null;
+      for (const icon of manifest?.icons ?? []) {
+        try {
+          const response = await fetch(new URL(icon.src, location.href));
+          icons.push({
+            sizes: icon.sizes ?? '',
+            type: icon.type ?? '',
+            purpose: icon.purpose ?? '',
+            status: response.status,
+            contentType: response.headers.get('content-type') ?? '',
+          });
+        } catch {
+          icons.push({ sizes: icon.sizes ?? '', type: icon.type ?? '', purpose: '', status: 0, contentType: '' });
+        }
+      }
+    } catch {
+      /* 离线（本段之后才会发生）时不成立，这里只在在线时读 */
+    }
+    return {
+      registered: Boolean(registration),
+      scope: registration?.scope ?? '',
+      controlled: Boolean(navigator.serviceWorker.controller),
+      manifestHref: manifestHref ?? '',
+      manifest,
+      icons,
+      // headless 下 Chrome 一般不派发 beforeinstallprompt，所以只作为参考信息
+      installPrompt: Boolean(window.__installPrompt),
+    };
+  });
+
+  const iconSizeOk = (sizes, wanted) =>
+    String(sizes)
+      .split(/\s+/)
+      .some((entry) => Number.parseInt(entry, 10) >= wanted);
+
+  console.log(
+    `   Service Worker：${pwa.registered ? `已注册（scope ${pwa.scope}）` : '未注册'}；页面受控 ${pwa.controlled}`,
+  );
+  console.log(
+    `   manifest：name=${pwa.manifest?.name} display=${pwa.manifest?.display} start_url=${pwa.manifest?.start_url}`,
+  );
+  console.log(
+    `   图标：${pwa.icons.map((icon) => `${icon.sizes}(${icon.status} ${icon.contentType})`).join('、')}`,
+  );
+  console.log(`   可安装信号（headless 下通常不触发，仅供参考）：${pwa.installPrompt}`);
+
+  if (!pwa.registered) problems.push('Service Worker 没有注册（PWA 不可安装，也就没有桌面图标）');
+  if (!pwa.controlled) problems.push('当前页面没有被 Service Worker 接管（离线就打不开）');
+  if (!pwa.manifest) problems.push('读不到 manifest');
+  else {
+    if (!pwa.manifest.name || !pwa.manifest.short_name) problems.push('manifest 缺 name / short_name');
+    if (pwa.manifest.display !== 'standalone') problems.push(`manifest display 不是 standalone（${pwa.manifest.display}）`);
+    if (!pwa.manifest.start_url) problems.push('manifest 缺 start_url');
+    if (pwa.manifest.prefer_related_applications) problems.push('manifest 开启了 prefer_related_applications，会挡住安装');
+    if (!pwa.icons.some((icon) => iconSizeOk(icon.sizes, 192))) problems.push('缺少 192px 及以上的图标');
+    if (!pwa.icons.some((icon) => iconSizeOk(icon.sizes, 512))) problems.push('缺少 512px 及以上的图标');
+    for (const icon of pwa.icons) {
+      if (icon.status !== 200 || !icon.contentType.includes('image/png')) {
+        problems.push(`图标取不到或类型不对：${icon.sizes} → ${icon.status} ${icon.contentType}`);
+      }
+    }
+  }
+
+  // 离线打开：装到桌面的图标即使服务器没开也应该能打开（外壳已被预缓存）
+  offlinePhase = true;
+  await page.context().setOffline(true);
+  let offlineOk = false;
+  try {
+    await page.reload({ waitUntil: 'load', timeout: 20_000 });
+    await page.waitForSelector('.app', { timeout: 15_000 });
+    offlineOk = true;
+  } catch {
+    offlineOk = false;
+  } finally {
+    await page.context().setOffline(false);
+    offlinePhase = false;
+  }
+  const offlineState = offlineOk
+    ? await page.evaluate(() => ({
+        rows: document.querySelectorAll('.row').length,
+        sidebar: Boolean(document.querySelector('.sidebar')),
+      }))
+    : null;
+  console.log(
+    `   离线（服务器不可达）打开：${offlineOk ? `成功（侧栏 ${offlineState?.sidebar}、列表 ${offlineState?.rows} 行）` : '失败'}`,
+  );
+  if (!offlineOk) problems.push('离线时打不开应用（Service Worker 没有预缓存外壳）');
+  result.pwa = { ...pwa, offlineOk };
 
   // 截图前收起自检面板，留一张干净的界面图
   await page.evaluate(() => document.getElementById('selfTestResult')?.remove());
