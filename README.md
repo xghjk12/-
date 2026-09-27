@@ -54,6 +54,38 @@ pnpm check:ui       # 本机 Edge 界面冒烟（需要本机装了 Edge）
 - 「去搜歌词」按你自己配置的地址模板打开新标签页（`{title} {artist} {album} {trackNo} {keyword}`），
   也可以只复制关键词；**应用不请求、不解析任何第三方内容**
 
+#### 给整个曲库补歌词：用外部工具，播放器负责认领
+
+播放器自己不去抓歌词，但它会自动认领音乐文件夹里的 `.lrc`——所以「批量补歌词」交给成熟工具做最省事。
+[LyricFlow](https://github.com/laoning666/lyricFlow)（批处理工具，CC BY-NC 4.0）做的正是
+「扫文件夹 → 搜索 → **存成与音频同名的 `.lrc`**」，与我们的同名规则天然对接。下面是**实测过**的做法：
+
+1. 取源码（本机 `github.com` 被 DNS 解析到 `127.0.0.1`，直连不通，所以走 CDN 镜像）：
+   `https://cdn.jsdelivr.net/gh/laoning666/lyricFlow@main/<路径>`
+2. 装依赖（只要两个）：`pip install httpx mutagen`
+3. 跑：
+   ```powershell
+   $env:MUSIC_PATH        = 'D:\轻音播放\新建文件夹'
+   $env:API_PROVIDER      = 'lrcapi'                 # 默认的 tunehub 主机在本机解析不了
+   $env:LRCAPI_URL        = 'https://api.lrc.cx'      # 已验证可用
+   $env:DOWNLOAD_COVER    = 'false'                   # 平铺文件夹只有一个目录，别塞 cover.jpg
+   $env:UPDATE_LYRICS     = 'false'                   # 保持关闭：不改写音频文件
+   $env:UPDATE_COVER      = 'false'
+   $env:UPDATE_BASIC_INFO = 'false'
+   python -m src.main
+   ```
+4. 回到播放器 → 歌词面板底部点**「重新扫描歌词」**→ 全部认领进来
+
+实测结果：2 首 / 2 首命中、同名文件生成正确、我们侧 `claimed 2`、无未匹配无歧义；
+《牵丝戏》与《STYX HELIX》第 30 秒的当前句都对得上。
+
+两个已知小瑕疵：① 生成的歌词首行常是 `[00:00.000] 作词 : X` / `作曲 : X` 这类署名行，
+会被当作一句歌词显示；② 它按「标签里的歌手 + 标题（+ 专辑）」去搜，选错版本时歌词内容会不对——
+用面板的**预览 + 偏移微调**就能看出来。
+
+`UPDATE_*` 三个开关**务必保持 false**：它们会把歌词/封面写进音频元数据，不可逆；而我们只读 `.lrc`，
+根本不需要。另外 `OVERWRITE_LYRICS` 默认就是 false，不会覆盖你已有的歌词。
+
 **播放**
 
 - `<audio>` + 对象 URL（不把文件读进内存，切歌时 revoke）
