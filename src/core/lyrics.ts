@@ -24,6 +24,13 @@ export interface LyricLine {
   text: string;
   /** 增强型 LRC 的逐字时间；没有就是 undefined。 */
   words?: LyricWord[];
+  /**
+   * 署名行（`作词 : X` / `Composed by：X` 这类）。
+   *
+   * 从网上下载的歌词首几行几乎都是这个，它们不是歌词正文。**保留但标记**，
+   * 由界面弱化显示——直接丢掉会让人以为歌词缺了开头。
+   */
+  credit?: boolean;
 }
 
 export interface Lyrics {
@@ -39,6 +46,14 @@ export interface Lyrics {
   by?: string;
   /** 是否带时间轴。 */
   synced: boolean;
+  /**
+   * 整份歌词只是"纯音乐占位"（例如 `[00:05.000]纯音乐，请欣赏`）。
+   *
+   * 这种情况下 `lines` 与 `plainLines` 都为空——界面应当显示"这首是纯音乐"，
+   * 而不是把占位文字当成一句歌词高亮。判定的充要条件是：**至少有一行占位文字，
+   * 且除署名行之外没有任何其它内容**，所以"署名 + 真的歌词"不会被误判。
+   */
+  instrumental?: boolean;
 }
 
 /** 时间戳：[分:秒]、[分:秒.小数] 或 [分:秒:小数]。 */
@@ -47,6 +62,25 @@ const TIMESTAMP = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
 const METADATA = /^\[(ti|ar|al|by|offset|re|ve|length):\s*(.*?)\s*\]$/i;
 /** 增强型 LRC 的逐字标签。 */
 const WORD_TAG = /<(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?>/g;
+/** 部分接口返回的"纯文本歌词"标记，例如 `[!text]第一句`。 */
+const TEXT_MARKER = /^\[!(?:text|plain)\]\s*/i;
+
+/**
+ * 署名行。
+ *
+ * 必须带分隔符（`:` / `：` / `by`），否则"曲"这种单字会误伤正常歌词。
+ * 单字的 `词` / `曲` 是中文站点的常见简写，一并认。
+ */
+const CREDIT_LINE =
+  /^(?:作词|作曲|编曲|词|曲|制作人|监制|混音|母带|录音|和声|配唱|出品|发行|策划|统筹|吉他|贝斯|鼓|键盘|弦乐|lyrics?|composed|music|arranged|arranger|producer|mixed|mixing|mastered|mastering|recording|vocals?|guitar|bass|drums|piano|strings)\s*(?::|：|by\b)/i;
+
+/**
+ * 纯音乐占位文字。
+ *
+ * 刻意**不含**笼统的"请欣赏"：真实歌词里出现"请欣赏"完全可能（"请你欣赏"不会命中，
+ * 但"请欣赏"本身会）。而实测下来的占位行全都带"纯音乐"，收窄一点不会漏。
+ */
+const INSTRUMENTAL_LINE = /纯音乐|没有填词|无填词|暂无歌词|\binstrumental\b|no lyrics/i;
 
 /** 把 `分` / `分.小数` / `分:小数` 折算成秒。 */
 function toSeconds(minutes: string, seconds: string, fraction?: string): number {
@@ -97,8 +131,12 @@ export function parseLyrics(text: string): Lyrics {
 
   const source = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
 
+  /** 占位行与署名行的原文本，判定 instrumental 时要用（去重即可）。 */
+  const placeholders = new Set<string>();
+  let hasRealContent = false;
+
   for (const rawLine of source.split('\n')) {
-    const line = rawLine.trim();
+    const line = rawLine.trim().replace(TEXT_MARKER, '').trim();
     if (!line) continue;
 
     // 元数据标签：整行就是一个标签
@@ -130,19 +168,42 @@ export function parseLyrics(text: string): Lyrics {
 
     if (stamps.length === 0) {
       // 没有时间戳：纯文本歌词（或夹在中间的说明文字）
-      lyrics.plainLines.push(parseWords(line).text);
+      const { text: plainText } = parseWords(line);
+      if (INSTRUMENTAL_LINE.test(plainText)) {
+        placeholders.add(plainText);
+        continue;
+      }
+      if (plainText && !CREDIT_LINE.test(plainText)) hasRealContent = true;
+      lyrics.plainLines.push(plainText);
       continue;
     }
 
     const { text: content, words } = parseWords(line.slice(cursor));
+    if (INSTRUMENTAL_LINE.test(content)) {
+      placeholders.add(content);
+      continue;
+    }
+    const credit = CREDIT_LINE.test(content) || undefined;
+    if (content && !credit) hasRealContent = true;
     for (const timeSec of stamps) {
-      lyrics.lines.push(words ? { timeSec, text: content, words } : { timeSec, text: content });
+      lyrics.lines.push(
+        words ? { timeSec, text: content, words, credit } : { timeSec, text: content, credit },
+      );
     }
   }
 
   // 时间戳可能乱序（手工编辑过的歌词很常见），排一下才能二分
   lyrics.lines.sort((a, b) => a.timeSec - b.timeSec);
   lyrics.synced = lyrics.lines.length > 0;
+
+  // 只有占位文字、没有真正的歌词正文 → 这是纯音乐
+  if (placeholders.size > 0 && !hasRealContent) {
+    lyrics.instrumental = true;
+    lyrics.lines = [];
+    lyrics.plainLines = [];
+    lyrics.synced = false;
+  }
+
   return lyrics;
 }
 

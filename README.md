@@ -50,6 +50,8 @@ pnpm check:ui       # 本机 Edge 界面冒烟（需要本机装了 Edge）
   有歧义不猜，交给手动）
 - 三种手动入口：导入 `.lrc` 文件、拖到歌词面板、粘贴歌词文本；GBK 老歌词也能正确解码
 - 面板按行高亮并自动滚动，**点击任意一句跳到那一句**；时间轴偏移可 ±0.5s 微调
+- 从网上下来的歌词里那些"不是歌词的内容"会正确处理：署名行（作词/作曲）弱化显示，
+  纯音乐占位（`纯音乐，请欣赏`）识别为"这首是纯音乐"，而不是当成一句歌词去高亮
 - 播放条上方有一行迷你歌词，点击打开面板
 - 「去搜歌词」按你自己配置的地址模板打开新标签页（`{title} {artist} {album} {trackNo} {keyword}`），
   也可以只复制关键词；**应用不请求、不解析任何第三方内容**
@@ -121,7 +123,7 @@ tests/fixtures/  真实音频样本（ffmpeg 生成，已提交，pnpm test 不�
 
 ```bash
 pnpm typecheck      # tsc --noEmit
-pnpm test           # 330 项单测（core / platform / ui）
+pnpm test           # 422 项单测（core 246 / platform 110 / ui 66）
 pnpm test:demo      # 37 项交互原型的 node:test 检查
 pnpm check:static   # 界面层静态一致性（类名与样式、冒烟选择器）
 pnpm check:bundle   # 构建 + 扫产物里的 node: 引用 + PWA 外壳检查

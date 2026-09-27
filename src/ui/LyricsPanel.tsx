@@ -162,7 +162,8 @@ export function LyricsPanel() {
         )}
       </header>
 
-      {record && (
+      {/* 纯音乐没什么可对轴的，偏移控件就不显示了 */}
+      {record && lyrics && !lyrics.instrumental && (
         <div className="lyrics-offset">
           <span>时间轴偏移 {offset >= 0 ? '+' : ''}{offset.toFixed(1)}s</span>
           <button className="btn btn-quiet" onClick={() => void nudgeOffset(currentPath, 0.5)} title="歌词提前 0.5 秒">
@@ -193,15 +194,18 @@ export function LyricsPanel() {
             <p
               key={`${line.timeSec}-${index}`}
               data-line={index}
-              className={`lyric-line${index === activeIndex ? ' lyric-active' : ''}${line.text ? '' : ' lyric-gap'}`}
+              className={
+                `lyric-line${index === activeIndex ? ' lyric-active' : ''}` +
+                `${line.text ? '' : ' lyric-gap'}${line.credit ? ' lyric-credit' : ''}`
+              }
               onClick={() => seek(Math.max(0, line.timeSec - offset))}
-              title="点击跳到这一句"
+              title={line.credit ? '署名行' : '点击跳到这一句'}
             >
               {line.text || '♪'}
             </p>
           ))}
 
-        {!loading && lyrics && !lyrics.synced && (
+        {!loading && lyrics && !lyrics.synced && !lyrics.instrumental && (
           <div className="lyrics-plain">
             <p className="lyrics-note">这份歌词没有时间轴，只能整体阅读。</p>
             {lyrics.plainLines.map((line, index) => (
@@ -212,9 +216,13 @@ export function LyricsPanel() {
           </div>
         )}
 
-        {!loading && !lyrics && (
+        {!loading && (!lyrics || lyrics.instrumental) && (
           <div className="lyrics-missing">
-            <p>这首歌还没有歌词。</p>
+            <p>
+              {lyrics?.instrumental
+                ? '这首是纯音乐，歌词文件里只有「纯音乐，请欣赏」这类占位文字。'
+                : '这首歌还没有歌词。'}
+            </p>
             <div className="lyrics-entries">
               <label className="btn">
                 导入 .lrc 文件
@@ -232,11 +240,14 @@ export function LyricsPanel() {
               <button className="btn" onClick={() => setPasteOpen((open) => !open)}>
                 粘贴歌词文本
               </button>
-              <button className="btn" onClick={openSearch}>
+              <button className="btn" onClick={openSearch} title={template ? undefined : '先设置一个歌词站地址'}>
                 <SearchIcon size={13} /> 去搜歌词
               </button>
             </div>
-            <p className="lyrics-note">也可以直接把 .lrc 文件拖到这块区域。</p>
+            <p className="lyrics-note">
+              也可以直接把 .lrc 文件拖到这块区域。
+              {!template && ' 「去搜歌词」需要你先在下面填一个自己常用的歌词站地址（应用不内置任何站点）。'}
+            </p>
           </div>
         )}
       </div>
@@ -362,13 +373,19 @@ export function MiniLyric() {
   // 否则"还没有歌词"的用户看不到任何入口（这条坑是真实使用反馈里暴露的）
   if (!currentPath) return null;
 
+  // 有歌词但还没到第一句（前奏）时，不能显示成"还没有歌词"——那是两回事
+  const hasLyrics = Boolean(lyrics) && !lyrics?.instrumental;
+
   return (
     <button className="minilyric" onClick={toggleLyrics} title="打开歌词面板">
       {text ? (
         <span className="minilyric-text">{text}</span>
+      ) : hasLyrics ? (
+        <span className="minilyric-text minilyric-wait">♪</span>
       ) : (
         <span className="minilyric-idle">
-          <WarnIcon size={12} /> 还没有歌词，点这里添加
+          <WarnIcon size={12} />
+          {lyrics?.instrumental ? ' 纯音乐，没有歌词' : ' 还没有歌词，点这里添加'}
         </span>
       )}
     </button>

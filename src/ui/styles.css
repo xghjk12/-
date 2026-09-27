@@ -200,6 +200,11 @@ button {
   color: var(--muted);
 }
 
+/* 有歌词但还在前奏：显示一个音符占位，而不是"还没有歌词" */
+.minilyric-wait {
+  color: var(--muted);
+}
+
 /* ==================== 侧栏 ==================== */
 
 .brand {
@@ -1063,6 +1068,18 @@ button {
 .lyric-gap {
   opacity: 0.35;
   cursor: default;
+}
+
+/* 署名行（作词/作曲/编曲…）：保留但不抢注意力，高亮时也不变成"当前歌词" */
+.lyric-credit {
+  font-size: 11.5px;
+  opacity: 0.5;
+}
+
+.lyric-credit.lyric-active {
+  color: var(--muted);
+  background: none;
+  font-weight: 400;
 }
 
 .lyrics-plain {

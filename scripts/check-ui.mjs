@@ -396,6 +396,51 @@ try {
   console.log(`   迷你歌词：「${mini}」`);
   if (!mini) problems.push('播放条上没有显示迷你歌词');
 
+  // ---- 粘贴 / 署名行弱化 / 纯音乐识别 / 移除（这几个动作原先只有单测覆盖）----
+  await page.locator('.row').nth(flacIndex).dblclick();
+  await page.waitForSelector('.lyrics-missing', { timeout: 15_000 });
+
+  await page.click('.lyrics-entries button:has-text("粘贴歌词文本")');
+  await page.fill('.lyrics-paste textarea', '[00:00.000] 作词 : 测试\n[00:10.000]真正的一句歌词');
+  await page.click('.lyrics-paste-actions button:has-text("保存歌词")');
+  await page.waitForSelector('.lyric-line', { timeout: 10_000 });
+  const pasted = await page.evaluate(() => ({
+    total: document.querySelectorAll('.lyric-line').length,
+    credit: document.querySelectorAll('.lyric-line.lyric-credit').length,
+    creditText: document.querySelector('.lyric-line.lyric-credit')?.textContent?.trim() ?? '',
+  }));
+  console.log(`   粘贴歌词：${pasted.total} 行，其中署名行 ${pasted.credit}（「${pasted.creditText}」）`);
+  if (pasted.total !== 2) problems.push(`粘贴后歌词行数不对：${pasted.total}`);
+  if (pasted.credit !== 1) problems.push('署名行没有被标记，界面无法弱化');
+
+  await page.click('button[title="移除歌词"]');
+  await page.waitForSelector('.lyrics-missing', { timeout: 10_000 });
+  console.log('   移除歌词：回到空状态 ✓');
+
+  await page.click('.lyrics-entries button:has-text("粘贴歌词文本")');
+  await page.fill('.lyrics-paste textarea', '[00:00.000] 作曲 : 某人\n[00:05.000]纯音乐，请欣赏');
+  await page.click('.lyrics-paste-actions button:has-text("保存歌词")');
+  await page.waitForFunction(
+    () => (document.querySelector('.lyrics-missing')?.textContent ?? '').includes('纯音乐'),
+    undefined,
+    { timeout: 10_000 },
+  );
+  const instrumentalState = await page.evaluate(() => ({
+    lines: document.querySelectorAll('.lyric-line').length,
+    notice: document.querySelector('.lyrics-missing')?.textContent?.trim().slice(0, 34) ?? '',
+    mini: document.querySelector('.minilyric')?.textContent?.trim() ?? '',
+    offset: Boolean(document.querySelector('.lyrics-offset')),
+  }));
+  console.log(
+    `   纯音乐占位：歌词行 ${instrumentalState.lines}；面板「${instrumentalState.notice}…」；迷你歌词「${instrumentalState.mini}」`,
+  );
+  if (instrumentalState.lines !== 0) problems.push('纯音乐占位仍被当成歌词行显示');
+  if (instrumentalState.offset) problems.push('纯音乐不该显示时间轴偏移控件');
+  if (!instrumentalState.mini.includes('纯音乐')) problems.push('纯音乐的迷你歌词提示不对');
+
+  await page.click('button[title="移除歌词"]');
+  await page.waitForSelector('.lyrics-missing', { timeout: 10_000 });
+
   await page.keyboard.press('y'); // 关掉抽屉，恢复版面
   await page.waitForTimeout(200);
 

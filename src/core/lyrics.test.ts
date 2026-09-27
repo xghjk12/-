@@ -241,3 +241,98 @@ describe('搜索地址模板', () => {
     );
   });
 });
+
+/**
+ * 这两块都来自真实下载到的歌词（外部工具 + LrcApi 的产出），不是假想用例：
+ * 库里 4 首纯音乐的占位行、以及每份歌词开头的署名行。
+ */
+describe('parseLyrics：纯音乐占位', () => {
+  it('只有占位行时判定为纯音乐，且不留下任何歌词行', () => {
+    const lyrics = parseLyrics('[00:05.000]纯音乐，请欣赏');
+    expect(lyrics.instrumental).toBe(true);
+    expect(lyrics.lines).toEqual([]);
+    expect(lyrics.plainLines).toEqual([]);
+    expect(lyrics.synced).toBe(false);
+  });
+
+  it('署名行 + 占位行（最常见的形态）同样判定为纯音乐', () => {
+    const lyrics = parseLyrics('[00:00.000] 作曲 : Hiboky\n[99:00.000]纯音乐，请欣赏');
+    expect(lyrics.instrumental).toBe(true);
+    expect(lyrics.lines).toEqual([]);
+  });
+
+  it('几种真实写法都能认出来', () => {
+    for (const text of [
+      '[00:01.580]纯音乐，请欣赏',
+      '[00:05.000]此歌曲为没有填词的纯音乐，请您欣赏',
+      '[00:05.000]暂无歌词',
+      '[00:05.000]Instrumental',
+      '纯音乐，请欣赏',
+    ]) {
+      expect(parseLyrics(text).instrumental, text).toBe(true);
+    }
+  });
+
+  it('署名 + 真的歌词不会被误判为纯音乐', () => {
+    const lyrics = parseLyrics('[00:00.000] 作词 : Vagary\n[00:23.650]嘲笑谁恃美扬威');
+    expect(lyrics.instrumental).toBeUndefined();
+    expect(lyrics.lines).toHaveLength(2);
+    expect(lyrics.synced).toBe(true);
+  });
+
+  it('占位行混在真歌词里时只丢掉占位行', () => {
+    const lyrics = parseLyrics(
+      '[00:00.000] 作曲 : Someone\n[00:05.000]纯音乐，请欣赏\n[00:10.000]真正的第一句',
+    );
+    expect(lyrics.instrumental).toBeUndefined();
+    expect(lyrics.lines.map((line) => line.text)).toEqual(['作曲 : Someone', '真正的第一句']);
+  });
+
+  it('人声念白不会被当成占位（Flower Dance 那种）', () => {
+    const lyrics = parseLyrics(
+      '[00:00.070]DJ Okawari - Flower Dance\n' +
+        '[00:02.670]Composed by：DJ OKAWARI\n' +
+        '[00:05.350]They serve the purpose of changing hydrogen into breathable oxygen',
+    );
+    expect(lyrics.instrumental).toBeUndefined();
+    expect(lyrics.lines).toHaveLength(3);
+  });
+});
+
+describe('parseLyrics：署名行', () => {
+  it('常见中英文署名都被标记，普通歌词不会被误标', () => {
+    const lyrics = parseLyrics(
+      [
+        '[00:00.000] 作词 : Vagary',
+        '[00:01.000] 作曲 : 银临',
+        '[00:02.000]编曲：Someone',
+        '[00:03.000]Composed by：DJ OKAWARI',
+        '[00:04.000]Lyrics by：Someone',
+        '[00:05.000]嘲笑谁恃美扬威',
+      ].join('\n'),
+    );
+
+    expect(lyrics.lines.map((line) => line.credit)).toEqual([true, true, true, true, true, undefined]);
+  });
+
+  it('必须带分隔符，单字「曲」不会误伤正常歌词', () => {
+    const lyrics = parseLyrics('[00:00.000]曲终人散');
+    expect(lyrics.lines[0]!.credit).toBeUndefined();
+  });
+
+  it('署名行仍然保留在 lines 里（只是标记出来，界面负责弱化）', () => {
+    const lyrics = parseLyrics('[00:00.000] 作词 : Vagary');
+    expect(lyrics.lines).toHaveLength(1);
+    expect(lyrics.lines[0]).toMatchObject({ credit: true, text: '作词 : Vagary' });
+    // 复制成文本时不该带上署名
+    expect(lyricsToText(lyrics)).toBe('作词 : Vagary');
+  });
+});
+
+describe('parseLyrics：接口返回的纯文本标记', () => {
+  it('`[!text]` 前缀会被剥掉，不进入歌词正文', () => {
+    const lyrics = parseLyrics('[!text]將一切理想\n[!text]定性為妄想');
+    expect(lyrics.instrumental).toBeUndefined();
+    expect(lyrics.plainLines).toEqual(['將一切理想', '定性為妄想']);
+  });
+});

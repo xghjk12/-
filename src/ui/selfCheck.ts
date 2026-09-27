@@ -125,6 +125,18 @@ function escapeHtml(value: string): string {
   );
 }
 
+/**
+ * 把检查项的值变成可以显示的字符串。
+ *
+ * 不能直接用 `JSON.stringify`：它对 `undefined`、函数、Symbol 返回的是 **undefined 而不是字符串**，
+ * 再传给 `escapeHtml` 就会在 `.replace` 上抛异常，把整个自检搞崩。
+ * （这个坑是我加了一条 `expected: undefined` 的检查项时踩到的。）
+ */
+function show(value: unknown): string {
+  const text = JSON.stringify(value);
+  return text === undefined ? String(value) : text;
+}
+
 function render(checks: Check[]): boolean {
   const passed = checks.every(
     (check) => JSON.stringify(check.actual) === JSON.stringify(check.expected),
@@ -134,8 +146,8 @@ function render(checks: Check[]): boolean {
     .map((check) => {
       const ok = JSON.stringify(check.actual) === JSON.stringify(check.expected);
       return `<tr><td>${escapeHtml(check.label)}</td><td>${escapeHtml(
-        JSON.stringify(check.actual),
-      )}</td><td>${escapeHtml(JSON.stringify(check.expected))}</td>
+        show(check.actual),
+      )}</td><td>${escapeHtml(show(check.expected))}</td>
       <td class="${ok ? 'ok' : 'bad'}">${ok ? '通过' : '不通过'}</td></tr>`;
     })
     .join('');
@@ -240,10 +252,16 @@ async function collect(): Promise<Check[]> {
 
   // 歌词解析与当前行定位（网页里也要能跑）
   const parsedLyrics = parseLyrics('[00:00.00]一\n[00:00.40]二\n[00:00.80]三');
+  const instrumentalLyrics = parseLyrics('[00:00.00] 作曲 : 某人\n[00:05.00]纯音乐，请欣赏');
+  const creditLyrics = parseLyrics('[00:00.00]作词 : 某人\n[00:10.00]真的歌词');
   checks.push(
     { label: '歌词解析：行数', actual: parsedLyrics.lines.length, expected: 3 },
     { label: '歌词解析：当前行定位（0.7s → 第 2 句）', actual: currentLineIndex(parsedLyrics.lines, 0.7), expected: 1 },
     { label: '歌词文件识别（.lrc）', actual: isLyricFileName('专辑/青花瓷.LRC'), expected: true },
+    { label: '纯音乐占位识别', actual: instrumentalLyrics.instrumental, expected: true },
+    { label: '纯音乐不留歌词行', actual: instrumentalLyrics.lines.length, expected: 0 },
+    { label: '署名行标记（作词）', actual: creditLyrics.lines[0]?.credit, expected: true },
+    { label: '正常歌词不被误标', actual: creditLyrics.lines[1]?.credit, expected: undefined },
   );
 
   // 界面：外壳已挂载 + 虚拟化真的生效
