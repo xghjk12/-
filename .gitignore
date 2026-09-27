@@ -14,3 +14,7 @@ artifacts/
 *.mp3
 !tests/fixtures/*.flac
 !tests/fixtures/*.mp3
+
+# 真实曲库目录：里面的音频已被上面的规则挡住，但外部工具下载来的 .lrc 会让
+# git 把整个目录报成未跟踪——整目录忽略，免得哪天误提交用户的音乐与歌词
+新建文件夹/
