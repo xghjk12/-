@@ -61,6 +61,10 @@ node desktop/checkWindow.js
 node desktop/checkTray.js
 # 单元测试（纯函数 + 真注册表读写往返，43 个）：
 npm run test:desktop          # 即 node --test "desktop/*.test.cjs"
+
+# (7) t3 验收：窗口+列表 / 真实播放 / 歌词面板 / 隐藏窗口后继续播（四条硬指标）
+node desktop/verify.mjs
+# 人工清单（托盘/重启自启/系统媒体键/托盘退出）见 desktop/verify.md
 ```
 
 `desktop/start.ps1` 支持的开关：`-Rebuild`（先构建再启动）、
@@ -330,6 +334,31 @@ JSON 在 `artifacts/desktop/tray-check.json`，截图在 `artifacts/desktop/tray
       取消勾选后该项消失；
 - [ ] 托盘菜单「退出」：托盘图标消失、进程退出。
 
+### 3.7 t3 验收：Playwright 驱动桌面端 + 人工清单（2026-10-22）
+
+脚本 `node desktop/verify.mjs`（每次用独立 profile `artifacts/desktop/userdata-verify`，
+启动前清空，不碰真实曲库）。报告 `artifacts/desktop/verify.json`，截图
+`verify-library.png` / `verify-lyrics.png` / `verify-after-hide.png` / `verify-desktop-hidden.png`。
+**完整判定细节与人工清单在 [`desktop/verify.md`](verify.md)**，这里只记结论与坑。
+
+| 验收条 | 判据（全部打印实测值） | 本次读数 |
+| --- | --- | --- |
+| 窗口 + 列表 | `waitForSelector('.row, .empty')` → 等 `rows>=4` → 再让两帧 → 才数 | 4 行：青花瓷 / 青花瓷 / fake APE / plain |
+| 真实播放 | 双击 plain 行；`audio.paused=false`、`currentTime>0.05`、`src` 是 blob URL | `plain.mp3`，src `blob:http://127.0.0.1:53140/…` |
+| 歌词面板 | 点侧栏「歌词」；断言不是占位态、3 行文本、标题=当前曲目 | 第一句/第二句/第三句 |
+| **隐藏后继续播** | `hideMainWindow()`（托盘菜单同一函数）→ 3 秒内每 150ms 采样 → 累计正增量 ≥1s 或自动切歌 | 21 次采样 / 3.1s：0 次暂停，累计前进 **2.956s**，切歌 1 次；EnumWindows 可见窗口里无轻音 |
+| 反证（防空转） | 暂停后用同一套采样，必须量不到前进 | `0.329108 → 0.329108`（delta 0） |
+
+这段验证踩到的两个事实，别再当成 bug 追：
+
+1. **`BrowserWindow.hide()` 不改变 `document.visibilityState`**（21 次采样全 `visible`）。
+   页面可见性不能当"窗口已隐藏"的判据；用主进程 `isVisible()` + OS 层 EnumWindows。
+2. `?selftest=1` 的自检结果浮层 `#selfTestResult` 会拦截鼠标事件（实测盖住抽屉关闭按钮）。
+   脚本量完结论后把它从 DOM 摘掉；真实用户入口没有这个节点。自检本身会临时塞 500 首
+   合成曲目，必须等 `<html data-self-test>` 出现后再量行数（虚拟化偶发的根因）。
+
+人工四项（托盘图标与菜单 / **重启后**自启 / 隐藏时的系统媒体键 / 托盘退出）见 `verify.md` 第 3 节，
+每项都写了"怎么看、预期、不符合时记什么"——其中重启自启与系统媒体键无法自动化。
 
 ---
 
@@ -673,6 +702,13 @@ t2 新增/修改（壳层五件套）：
 | `desktop/checkTray.js`（新） | t2 全量验证脚本（§3.6，报告落 `artifacts/desktop/tray-check.json`） |
 | `desktop/postCloseToQingyin.ps1`（新） | 向轻音主窗口投递真实 WM_CLOSE（坑 6/7 的经验都在里面） |
 | `desktop/appVersion.test.cjs` / `shellSettings.test.cjs` / `shellText.test.cjs` / `trayMenu.test.cjs` / `autoStart.test.cjs`（新） | 43 个单测（`npm run test:desktop`） |
+
+t3 新增（验收）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `desktop/verify.mjs`（新） | t3 验收脚本：窗口+列表 / 双击真播放 / 歌词面板 / **隐藏后继续播**（含 OS 层 EnumWindows 证据与暂停反证）/ 附加托盘退出；报告落 `artifacts/desktop/verify.json` |
+| `desktop/verify.md`（新） | 自动化的判定细节 + 四项人工清单（托盘图标与菜单、重启后自启、隐藏时系统媒体键、托盘退出），每项写明"怎么看/预期/不符合记什么" |
 
 **没动过**：`src/core`、`src/ui`、`src/platform`、`scripts/`、`vite.config.ts`、
 `package.json` 里已有的脚本（t2 在 scripts 里**新增**了 `"test:desktop"` 一条，
