@@ -146,6 +146,19 @@ async function main() {
     }, 20000);
     check(Boolean(started), '双击第一行后真的开始播放（audio.paused=false）', started);
 
+    // 内置样本只有 1–2 秒：不锁播放模式的话曲目会自动往下走，「下一首/上一首」
+    // 的断言就分不清是命令生效还是自动切歌。锁成单曲循环（repeat-one）：
+    // 自动前进会停在当前曲目（core/queue.ts 的 advance），而手动 next/prev
+    // 仍然按队列走——后者正是要验的那两条路。
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const mode = await win.evaluate(() => window.__qingyinTest.state().mode);
+      if (mode === 'repeat-one') break;
+      await win.evaluate(() => window.__qingyinTest.cycleMode());
+      await sleep(200);
+    }
+    facts.playMode = await win.evaluate(() => window.__qingyinTest.state().mode);
+    check(facts.playMode === 'repeat-one', '播放模式锁成单曲循环（避免短样本自动切歌干扰断言）', { mode: facts.playMode });
+
     const statePlaying = await waitFor(async () => {
       const state = await app.evaluate(() => globalThis.__qingyinDesktopShell.readState());
       return menuItem(state, 'play-pause')?.label === '暂停' ? state : null;
@@ -173,17 +186,42 @@ async function main() {
       windowExists: hidden.windowExists,
     });
     check(hidden.menu.find((item) => item.id === 'toggle-window')?.label === '显示窗口', '菜单文案换成「显示窗口」');
-    const posHidden1 = await win.evaluate(() => window.__qingyinTest.positionSec());
-    await sleep(1200);
-    const posHidden2 = await win.evaluate(() => window.__qingyinTest.positionSec());
-    check(posHidden2 > posHidden1, '隐藏期间进度仍在走（还在放歌）', { posHidden1, posHidden2 });
-    check((await win.evaluate(() => window.__qingyinTest.paused())) === false, '隐藏期间 audio.paused=false');
+
+    // 样本只有 1–2 秒，"隔 1.2 秒比一次进度"会被循环重播骗到（第二次采样可能更小）。
+    // 所以密集采样：只要出现过一次递增、且全程 paused=false，就证明还在放。
+    const samples = [];
+    for (let index = 0; index < 8; index += 1) {
+      samples.push(
+        await win.evaluate(() => ({
+          positionSec: window.__qingyinTest.positionSec(),
+          paused: window.__qingyinTest.paused(),
+        })),
+      );
+      await sleep(200);
+    }
+    facts.hiddenSamples = samples.map((sample) => ({
+      positionSec: Number(sample.positionSec.toFixed(3)),
+      paused: sample.paused,
+    }));
+    const advanced = samples.some((sample, index) => index > 0 && sample.positionSec > samples[index - 1].positionSec);
+    check(advanced, '隐藏期间进度在走（还在放歌）', facts.hiddenSamples.map((sample) => sample.positionSec));
+    check(
+      samples.every((sample) => sample.paused === false),
+      '隐藏期间 audio.paused 始终为 false',
+      facts.hiddenSamples.map((sample) => sample.paused),
+    );
 
     // ---------- 4. 隐藏状态下的托盘播放控制 ----------
     console.log('\n== 4) 隐藏状态下用托盘命令控制播放 ==');
 
     const send = async (type) => {
-      const result = await app.evaluate((commandType) => globalThis.__qingyinDesktopShell.playbackCommand(commandType), type);
+      // 注意：ElectronApplication.evaluate 的 pageFunction 第一个参数**永远是 electron 模块**，
+      // 第二个才是传进去的 arg（PageFunctionOn<ElectronType, Arg, R>）。少写第一个参数
+      // 的话 electron 模块会被当成命令类型，主进程会回一句"不是合法的播放命令：[object Object]"。
+      const result = await app.evaluate(
+        (_electron, commandType) => globalThis.__qingyinDesktopShell.playbackCommand(commandType),
+        type,
+      );
       check(result?.ok === true, `托盘命令已送达渲染进程：${type}`, result);
       return result;
     };
@@ -237,7 +275,8 @@ async function main() {
       rendererIndex,
       mainIndex: indexAfterNext,
     });
-    check((await pausedNow()) === false, '切歌后仍在播放（audio.paused=false）');
+    const playingAfterNext = await waitFor(async () => ((await pausedNow()) === false ? true : null), 10000);
+    check(Boolean(playingAfterNext), '切歌后仍在播放（audio.paused=false）', { paused: await pausedNow() });
 
     // 4d. 上一首
     await send('prev');

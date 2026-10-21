@@ -361,6 +361,107 @@ JSON 在 `artifacts/desktop/tray-check.json`，截图在 `artifacts/desktop/tray
 人工四项（托盘图标与菜单 / **重启后**自启 / 隐藏时的系统媒体键 / 托盘退出）见 `verify.md` 第 3 节，
 每项都写了"怎么看、预期、不符合时记什么"——其中重启自启与系统媒体键无法自动化。
 
+### 3.8 t6：托盘播放控制 + 窗口状态记忆（2026-10-22）
+
+两件事都只在 `desktop/` 里落地，渲染侧只加了一个独立文件（`src/ui/desktopShell.ts`）
+和 `src/main.tsx` 里的两行——**没有动 `store.ts`**，没有新增依赖。
+
+#### 3.8.1 托盘播放控制：两条单向通道，主进程一律不猜
+
+```
+托盘菜单点「暂停」
+  → main.js sendPlaybackCommand('play-pause')         （白名单：constants.SHELL_COMMAND_TYPES）
+  → webContents.send('shell:command', { type })       （窗口隐藏时照样送达）
+  → preload.js onCommand 的 listener
+  → src/ui/desktopShell.ts 按 type 只调 store 既有动作 togglePlay / previous / next
+
+渲染侧状态变化
+  → useAppStore.subscribe → 只在 {playing,currentIndex,queueLength,hasTrack} 这组切片变了才发
+  → preload.js reportStatus（只过桥这四个键）
+  → mainIpc.js ipcMain.on('shell:status')
+  → playbackStatus.js normalizePlaybackStatus → main.js 存下 → tray.refresh()
+```
+
+两个刻意的设计决定：
+
+1. **播放状态一律由渲染进程上报，主进程不推断。** 自动切歌、整队放完停下、用户按媒体键，
+   这些时刻只有 store 知道；猜出来的「播放/暂停」文案一定会在某个时刻骗用户。
+   上报是**节流**的（只在菜单关心的四个字段变化时发），音量/静音/抽屉开关这些都不会触发。
+2. **没有当前曲目时三项直接禁用**（`hasTrack = queue.length > 0 && currentIndex >= 0`）。
+   一个点了没反应的菜单项比一个灰掉的更糟。曲库为空时实测：三项都在、都 `enabled:false`、
+   文案是「播放」。
+
+窗口隐藏（未销毁）时命令必须生效——这就是本功能的全部意义，所以验收脚本第 4 步
+**全程在隐藏状态下**发命令，并顺手断言 `windowVisible === false`。
+
+#### 3.8.2 窗口状态记忆：存在 settings.json，不进 IndexedDB
+
+存在 `desktop/shellSettings.js` 的第四个键 `windowState`（`{x,y,width,height,maximized}`）。
+**刻意不进 IndexedDB**：这是壳层状态，必须在渲染进程存在之前就能同步读到（开窗那一刻就要用），
+而 IndexedDB 只有页面加载后才可访问，且和曲库数据混在一起会让"清曲库"顺带清掉窗口位置。
+
+三个必须处理的真实情况：
+
+| 情况 | 处理 | 代码 |
+| --- | --- | --- |
+| **拔掉副屏后坐标落在不存在的屏幕上**（窗口"打开了但看不见"） | 启动前用 `screen.getAllDisplays()` 的 workArea 做双轴重叠校验，不足 120px 视为越界 → 回退主屏居中默认尺寸，并把原因打进日志 | `windowState.js resolveStartupWindow` |
+| **最小化时 `getBounds()` 返回 -32000** | 最小化直接返回 null（不排写盘）；最大化时取 `getNormalBounds()`，存的是还原后的真实尺寸 | `windowState.js captureWindowState` |
+| **拖动时每次像素变动都触发 resize/move** | 600ms 防抖 + 与上次写盘内容去重；真退出（托盘「退出」/会话结束）时 flush 一次 | `windowState.js createDebouncedSaver` |
+
+`saveSettings` 是**部分更新**语义（t5 定的），所以几何写盘只传 `{ windowState }`，
+开机自启开关和补歌词的两个路径不会被冲掉——`shellSettings.test.cjs` 里两个方向都钉了断言。
+
+#### 3.8.3 实测（两个脚本，全部打印真实读数）
+
+`node desktop/checkTrayPlayback.js` → `artifacts/desktop/tray-playback-check.json`：
+
+| 验收条 | 判据 | 本次读数 |
+| --- | --- | --- |
+| 空曲库 | 三项存在且禁用、文案「播放」 | ids `[…play-pause,prev,next…]`；三项 `enabled:false`；`hasTrack:false` |
+| 播放后文案 | 上报 → 菜单换向 | `{playing:true,hasTrack:true,currentIndex:0,queueLength:4}`，文案「暂停」，三项 `enabled:true` |
+| 隐藏期间还在放 | 密集采样（样本只有 1–2 秒，隔 1.2 秒比一次会被循环重播骗到） | 8 次采样 `0.841→1.881→0.048→0.248`，`paused` 全 false |
+| **隐藏时「暂停」** | `audio.paused === true` | `paused:true`，文案换回「播放」，主进程 `playing:false`，`windowVisible:false` |
+| **隐藏时「播放」** | `audio.paused === false` | `paused:false`，文案「暂停」 |
+| **隐藏时「下一首」** | 下标前进且与渲染侧一致 | `0 → 1`；主进程记的 `currentIndex:1` === 渲染进程 store 的 `1` |
+| 隐藏时「上一首」 | 下标回退到切歌前那首 | `1 → 0`（=== `indexBeforeNext`） |
+| 白名单 | 非播放命令不许发出去 | `playbackCommand('quit')` → `{ok:false,reason:'不是合法的播放命令：quit'}` |
+
+`node desktop/checkWindowState.js` → `artifacts/desktop/window-state-check.json`，**连开四次真实进程**
+（每次都读磁盘上的 `settings.json`，不问主进程"你以为存了什么"）：
+
+| 启动 | 做了什么 | 本次读数 |
+| --- | --- | --- |
+| 1（首次，无存档） | 默认几何 → `setBounds` → 12 次像素级移动 → 最大化 → 托盘退出 | 来源 `default`，`{48,0,1440,824}`；落盘 `{60,40,1180,704}`；**写盘计数 1 → 1**（防抖生效）；最大化后存 `{72,52,1198,722,maximized:true}`，而屏幕 bounds 是 `{-7,-7,1552,840}`（证明存的是 normalBounds） |
+| 2（有存档） | 恢复 → 还原 → 换几何 → 退出 | 来源 `saved`，`isMaximized()===true`；还原后 `{72,52,1200,727}` ≈ 存档的普通几何；新几何 `{220,160,1024,600}` 落盘 |
+| 3（存档 `-32000,-32000`） | 必须回退到屏幕内 | 来源 `default`，reason「已保存的位置 …不在任何屏幕的工作区里（显示器被拔掉？），回退到主屏居中」；窗口可见且 `{48,0,1440,824}` 通过 workArea 重叠校验；退出时写回的是屏幕内几何 |
+| 4（存档 `x=3000`，模拟拔掉的副屏） | 回退 + 隐藏后退出 | 来源 `default`，窗口在屏幕内；隐藏（未销毁）后走托盘退出 → 存档里没有 `-32000` 类垃圾坐标 |
+
+单测：`playbackStatus.test.cjs` 12 / `windowState.test.cjs` 32 / `channels.test.cjs` 8 /
+`shellSettings.test.cjs` 20（含 6 个 windowState）/ `src/ui/desktopShell.test.ts` 15。
+`channels.test.cjs` 是个**静态防漂移**测试：把三份源码当文本读，钉住通道名字面量、命令白名单、
+上报字段名在 `constants.js` / `preload.js` / `main.js` / `mainIpc.js` / `src/ui/desktopShell.ts`
+之间一致（sandbox 化的 preload 不能 `require` 本地模块，通道名只能重复写，所以必须有这道锁）。
+
+#### 3.8.4 渲染侧那 20 行的三条硬约束（队长定的，单测逐条钉住）
+
+`src/ui/desktopShell.ts` 是这次唯一进 `src/` 的新文件，`src/ui/desktopShell.test.ts` 15 个用例：
+
+1. **零影响**：桥不存在（浏览器 / PWA）→ 在订阅任何东西**之前**就 return，不碰 store、
+   不注册全局监听、不上报（4 个用例，含"桥只有半个"和"桥是垃圾值"）。
+2. **只调既有动作**：三条命令分别只调 `togglePlay` / `previous` / `next`（用 spy 替掉，
+   不碰真实 audio），未知 type 忽略；`channels.test.cjs` 另外静态禁止这个文件里出现
+   `getAudioElement` 或 `useAppStore.setState`。
+3. **幂等**：`startDesktopShell()` 连调三次只订阅一次（HMR 会重跑入口）；
+   上报回调整个换成会抛的，也不许打断订阅。
+4. 动作 reject / 抛错都不许冒泡成渲染进程的 unhandled rejection（`runStoreAction` 兜住），
+   且之后的命令照常可用。
+
+web 侧无退化的客观证据：`pnpm verify` 全绿（`tsc --noEmit`、vitest 452 passed | 1 skipped、
+`node --test "desktop/*.test.cjs"` 117 passed、demo 37 passed、`check:static`、
+`check:bundle` 产物检查通过，exit 0），`vite build` 的 precache 从 577.54 KiB 变 577.82 KiB。
+
+人工两项（托盘三键的手感、拖动/最大化后重启看窗口回位）见 `verify.md` 第 5 节。
+
 ---
 
 ## 4. fs 桥最小设计（**只有设计，没有实现**）
@@ -661,6 +762,38 @@ WebContents，**不触发** `BrowserWindow` 的 `close` 事件（`preventDefault
 `node --test "desktop/*.test.cjs"`（Node 24 会自己展开 glob，npm scripts 里也行）。
 另注意根 `package.json` 是 `"type":"module"`，`desktop/` 之外写的临时脚本要存 `.cjs`。
 
+### 坑 11（t6）：Playwright 的 `ElectronApplication.evaluate` 第一个参数**永远是 electron 模块**
+
+类型是 `evaluate<R, Arg>(pageFunction: PageFunctionOn<ElectronType, Arg, R>, arg: Arg)`——
+`pageFunction(electron, arg)`，两个参数。所以传参必须写：
+
+```js
+// 对：第一个形参接 electron 模块，第二个才是自己的 arg
+await app.evaluate((_electron, type) => globalThis.__qingyinDesktopShell.playbackCommand(type), 'next');
+// 错：type 收到的是 electron 模块
+await app.evaluate((type) => globalThis.__qingyinDesktopShell.playbackCommand(type), 'next');
+```
+
+写错的症状很好认：主进程回一句 `不是合法的播放命令：[object Object]`（t6 第一版就撞了，
+9 条断言一起红）。页面侧的 `win.evaluate` 没有这个规矩，只有主进程侧有。
+
+### 坑 12（t6）：连着开四次进程，CDP 偶发 `read ECONNRESET`（不是产品问题）
+
+`_electron.launch()` 偶尔在**应用已经正常起来之后**断掉调试通道：日志里
+`[desktop] origin = …`、`[desktop] 窗口几何来源 = …` 都打印出来了，随后
+`ws disconnected code=1006` / `WebSocket error: read ECONNRESET`，Playwright 抛错、
+进程被 force kill（`exitCode=4294967295`）。一个脚本要连开四次进程时撞上的概率不低。
+处理：`launch()` 包一层重试（3 次，间隔 2 秒），**每次失败都记进报告的 mainLog**，不装作没发生。
+
+### 坑 13（t6）：几何断言必须按 Windows 的两个真实行为写，否则是假失败
+
+1. `setBounds` 请求的尺寸小于 `minWidth`/`minHeight` 时会被**夹到最小值**：
+   请求 `height:584` → 实际存 `600`。验收脚本算目标几何时要 `Math.max(WINDOW_MIN_*, …)`。
+2. 最大化 → 还原这一来一回，`getNormalBounds()` 会比原值漂十几个像素
+   （本机 125% DPI：`1180x704` → `1198x722`，不可见边框的锅）。位置是准的，尺寸要用宽容差。
+
+这两条都不是 bug，是 Electron/Windows 的既有行为；断言写死了就会红得毫无信息量。
+
 ---
 
 ## 6. 文件清单
@@ -730,6 +863,33 @@ t5 新增/修改（补歌词，详见 §9）：
 | `src/main.tsx`（改） | +2 行：import + `initDesktopLyrics()` |
 | `src/ui/store.ts`（改） | `rescanLyrics` 修复（§9.3）：重扫前重新遍历目录，扫描后写入的 .lrc 真能认领 |
 
+t6 新增/修改（托盘播放控制 + 窗口状态记忆，详见 §3.8）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `desktop/playbackStatus.js`（新） | 纯函数：上报状态规范化（垃圾值一律降级成"未知"，计数只认非负整数）、菜单相关切片比较、`play-pause` 文案、命令白名单判定（单测 12） |
+| `desktop/windowState.js`（新） | 纯函数：几何规范化、workArea 重叠判定、启动几何决策（`resolveStartupWindow`，越界回退主屏居中）、`captureWindowState`（最大化取 normalBounds / 最小化返回 null）、防抖+去重写盘器（单测 32） |
+| `desktop/constants.js`（改） | 加 `IPC_SHELL_COMMAND` / `IPC_SHELL_STATUS` / `SHELL_COMMAND_TYPES` / `WINDOW_MIN_*` / `WINDOW_DEFAULT_*` |
+| `desktop/trayMenu.js`（改） | 菜单插「播放/暂停（随状态换文案）、上一首、下一首」，无当前曲目时三项禁用；t5 的补歌词分组原样保留 |
+| `desktop/tray.js`（改） | `refresh()` 带上 `getPlayback()`；三个新 id 接到 `onPlaybackCommand(type)` |
+| `desktop/preload.js`（改） | `onCommand(cb)`（返回取消订阅、回调抛错不外泄）+ `reportStatus(status)`（只过桥四个已知键） |
+| `desktop/shellSettings.js`（改） | 第四个键 `windowState`（load 时规范化，旧存档 → null；save 沿用部分更新语义） |
+| `desktop/window.js`（改） | `createMainWindow` 接受 `x/y/width/height/minWidth/minHeight`（只接受调用方校验过的几何） |
+| `desktop/mainIpc.js`（改） | `ipcMain.on('shell:status')` → `context.onShellStatus(payload)`（重复装配不叠层） |
+| `desktop/main.js`（改） | 播放状态存放 + `sendPlaybackCommand`（白名单 + `webContents.send`）+ 启动几何决策 + 5 个几何事件的防抖保存 + 真退出/`will-quit` flush + shell 句柄加 `playbackCommand/readPlaybackStatus/readWindowState/saveWindowStateNow` |
+| `desktop/checkTrayPlayback.js`（新） | §3.8.3 的验收脚本一（隐藏状态下四条命令 + 白名单反证），报告 `artifacts/desktop/tray-playback-check.json` |
+| `desktop/checkWindowState.js`（新） | §3.8.3 的验收脚本二（四次真实启动：记住/恢复/最大化/两种屏幕外回退），报告 `artifacts/desktop/window-state-check.json` |
+| `desktop/checkTray.js`（改） | 菜单结构断言从"精确全列表"换成不变式（必备 id 全集 + `quit` 收尾 + id 不重复 + 分隔条数），其余断言一条没删——这个脚本不在 `node --test` 范围内，精确比对每加一个菜单项就红一次而没人知道 |
+| `desktop/playbackStatus.test.cjs` / `windowState.test.cjs` / `channels.test.cjs`（新） | 12 + 32 + 8 个单测；`channels.test.cjs` 是把五份源码当文本读的**防漂移**锁（通道名/白名单/字段名一致，且渲染侧不许出现 `getAudioElement`、`useAppStore.setState`） |
+| `desktop/shellSettings.test.cjs`（改） | +6：windowState 往返、旧存档兼容、脏结构丢成 null、部分更新双向、显式 null 可清除 |
+| `src/ui/desktopShell.ts`（新） | 渲染侧唯一新文件：命令 → 只调 store 既有动作；`store.subscribe` → 只在四字段切片变化时上报；桥不存在时**在订阅之前**就 return；模块级 guard 保证幂等 |
+| `src/ui/desktopShell.test.ts`（新） | 15 个用例，对应 §3.8.4 的四条硬约束 |
+| `src/main.tsx`（改） | +2 行（与 t5 的 `initDesktopLyrics()` 并存）：import + `startDesktopShell()` |
+
+**t6 没动过**：`src/ui/store.ts`、`src/core`、`src/platform`、`scripts/`、`vite.config.ts`、
+根 `package.json`（一个脚本都没加，`test:desktop` 的 glob 自动带上新增的 `.test.cjs`）、
+以及 `desktop/` 之外除 `src/main.tsx` 两行与 `src/ui/desktopShell*.ts` 以外的任何文件。
+
 **没动过**：`src/core`、`src/platform`（`src/ui/store.ts` 的 `rescanLyrics` 与 LyricsPanel/
 desktopLyrics 除外，见上表与 §9.3——那是 t5 的最小必要接缝）、`scripts/`、
 `vite.config.ts`、`package.json` 里已有的脚本（t2 只**新增**了 `"test:desktop"`）。
@@ -757,6 +917,13 @@ desktopLyrics 除外，见上表与 §9.3——那是 t5 的最小必要接缝�
 9. **注册表写入的"用户双击"路径没法在本 harness 内验证**（坑 8 的降权），
    node 桥证明了命令与读写逻辑（§8），真人路径留给 t3 人工清单。
 10. Service Worker 与 CSP 的遗留项见 §7.3/§7.4，未动。
+11. **几何只在"真退出"时保证落盘**（t6）：防抖窗口 600ms，进程被强杀（任务管理器 /
+    断电 / 崩溃）时最后一次拖动可能丢。设计上接受这个代价——"每次像素变动都写盘"
+    换来的是拖动全程的磁盘抖动，不值。
+12. **托盘播放三项依赖渲染进程活着**（t6）：渲染进程崩溃后 `webContents.send` 无处可送，
+    `sendPlaybackCommand` 返回 `{ok:false, reason:'主窗口不存在…'}` 并打日志；菜单会停在
+    最后一次上报的状态（因为没人再上报）。走 `showMainWindow()` 的兜底重建之后，
+    渲染侧会重新上报，状态自动恢复。
 
 ---
 

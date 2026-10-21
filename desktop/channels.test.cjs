@@ -82,3 +82,27 @@ test('渲染侧的上报字段与 preload 过桥的字段是同一组', () => {
     assert.ok(preload.includes(field), `desktop/preload.js 缺字段 ${field}`);
   }
 });
+
+test('主进程侧：mainIpc 收上报、main 发命令，用的都是 constants 里的常量', () => {
+  const mainIpc = readSource('desktop/mainIpc.js');
+  assert.match(
+    mainIpc,
+    /ipcMain\.on\(IPC_SHELL_STATUS/,
+    'mainIpc.js 必须监听 IPC_SHELL_STATUS（否则渲染进程的上报没人收，托盘文案永远停在「播放」）',
+  );
+  assert.match(mainIpc, /IPC_SHELL_STATUS[,}]/, 'mainIpc.js 必须从 constants.js 取常量，不要写字面量');
+
+  const main = readSource('desktop/main.js');
+  assert.match(
+    main,
+    /webContents\.send\(constants\.IPC_SHELL_COMMAND/,
+    'main.js 必须用 constants.IPC_SHELL_COMMAND 发命令（字面量拼错就是"点了没反应"）',
+  );
+});
+
+test('命令白名单在主进程侧被真的检查了（不是只有常量摆着）', () => {
+  const main = readSource('desktop/main.js');
+  assert.match(main, /isShellCommandType\(/, 'main.js 发命令前要过白名单');
+  const status = readSource('desktop/playbackStatus.js');
+  assert.match(status, /SHELL_COMMAND_TYPES\.includes/, 'playbackStatus.js 的白名单要真比对常量表');
+});

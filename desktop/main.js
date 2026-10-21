@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, screen } = require('electron');
 const constants = require('./constants.js');
 const { readAppVersion } = require('./appVersion.js');
 const { installDesktopIpc } = require('./mainIpc.js');
@@ -13,6 +13,9 @@ const { createMainWindow } = require('./window.js');
 const { createAppTray } = require('./tray.js');
 const { loadSettings, saveSettings } = require('./shellSettings.js');
 const { titleWithVersion, trayTooltip } = require('./shellText.js');
+// t6：托盘播放控制（状态规范化 + 命令白名单）与窗口状态记忆（几何决策 + 防抖写盘）
+const { PLAYBACK_STATUS_UNKNOWN, isShellCommandType, normalizePlaybackStatus } = require('./playbackStatus.js');
+const { captureWindowState, createDebouncedSaver, resolveStartupWindow } = require('./windowState.js');
 const {
   buildRunCommand,
   enableLoginItem,
@@ -58,6 +61,13 @@ let settings = loadSettings(userDataDir);
 let isQuitting = false;
 // t5：补歌词工具控制器（boot 里由 installLyricsIpc 装配，托盘/IPC/退出共用）
 let lyrics = null;
+// t6：播放状态。**只有渲染进程知道它在放什么**，主进程存的是它上报的规范化结果，
+// 托盘菜单的「播放/暂停」文案与禁用态都读这里——绝不从别处推断（猜出来的文案会骗用户）
+let playback = { ...PLAYBACK_STATUS_UNKNOWN };
+// t6：启动时的窗口几何决策（source/reason 要给验证脚本看，回退必须能自证）
+let startupWindow = null;
+// t6：几何写盘的防抖器（拖动过程中不写，停下来写一次；真退出时 flush）
+let windowSaver = null;
 
 function fail(title, detail) {
   // showErrorBox 不依赖窗口，ready 前后都能用
@@ -83,13 +93,83 @@ function windowTitle() {
   return titleWithVersion(constants.APP_NAME, appVersion, constants.APP_NAME);
 }
 
+// ---- t6：窗口状态记忆 ----
+
+/** 部分更新地写 settings.json（只传要改的键，别人的键不受影响）。 */
+function persistSettings(patch) {
+  settings = saveSettings(userDataDir, patch);
+  return settings;
+}
+
+/**
+ * 立刻抓一次几何并落盘（绕过防抖）。
+ *
+ * 用在真退出路径上：进程马上就要没了，防抖的定时器不会有机会跑。
+ * 抓不到（窗口已销毁/最小化）时返回 null，不会把垃圾坐标写进存档。
+ *
+ * @returns {{ captured: object | null, wrote: boolean, saved: object | null }}
+ */
+function saveWindowStateNow() {
+  const captured = captureWindowState(mainWindow);
+  if (captured) windowSaver?.schedule(captured);
+  const wrote = windowSaver ? windowSaver.flush() : false;
+  return { captured, wrote, saved: settings.windowState };
+}
+
+/** 几何变化时排一次写盘（防抖 + 去重在 windowState.js 里）。 */
+function scheduleWindowStateSave(win) {
+  windowSaver?.schedule(captureWindowState(win));
+}
+
+// ---- t6：托盘播放控制 ----
+
+/**
+ * 把一条播放命令送给渲染进程。
+ *
+ * 用的是 `webContents.send`——窗口**隐藏但没销毁**时照样送达，这正是本功能的
+ * 意义所在：关窗到托盘之后音乐还在放，托盘上的暂停/切歌也就必须还能用。
+ *
+ * @param {string} type 'play-pause' | 'prev' | 'next'（白名单见 constants.js）
+ * @returns {{ ok: boolean, type?: string, windowVisible?: boolean, reason?: string }}
+ */
+function sendPlaybackCommand(type) {
+  if (!isShellCommandType(type)) {
+    return { ok: false, reason: `不是合法的播放命令：${String(type)}` };
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { ok: false, reason: '主窗口不存在（渲染进程已销毁），命令无处可送' };
+  }
+  mainWindow.webContents.send(constants.IPC_SHELL_COMMAND, { type });
+  return { ok: true, type, windowVisible: mainWindow.isVisible() };
+}
+
+/** 渲染进程上报播放状态 → 规范化存下 → 刷新托盘菜单文案。 */
+function applyPlaybackStatus(raw) {
+  playback = normalizePlaybackStatus(raw);
+  tray?.refresh();
+  return playback;
+}
+
 function createWindow() {
-  const win = createMainWindow({ distDir, title: windowTitle() });
+  const win = createMainWindow({
+    distDir,
+    title: windowTitle(),
+    // 几何来自 boot() 里的 resolveStartupWindow（已用 screen.getAllDisplays() 校验过，
+    // 越界的存档在那一步就被换成主屏居中了）。null = 交给系统定位
+    x: startupWindow?.bounds?.x ?? null,
+    y: startupWindow?.bounds?.y ?? null,
+    width: startupWindow?.bounds?.width,
+    height: startupWindow?.bounds?.height,
+  });
   mainWindow = win;
 
   // 关窗到托盘：**只隐藏，绝不销毁**（销毁 = 渲染进程死 = 音乐停）
   win.on('close', (event) => {
-    if (isQuitting) return; // 真退出（托盘「退出」/系统会话结束）：放行
+    if (isQuitting) {
+      // 真退出（托盘「退出」/系统会话结束）：把最后的几何落盘再放行
+      saveWindowStateNow();
+      return;
+    }
     event.preventDefault();
     win.hide();
     tray?.refresh();
@@ -109,6 +189,14 @@ function createWindow() {
     event.preventDefault();
     win.setTitle(titleWithVersion(title, appVersion, constants.APP_NAME));
   });
+
+  // t6：几何变化 → 防抖写盘。resize/move 在拖动过程中每次像素变动都触发，
+  // 所以既不能每次都写（见 windowState.js 的防抖），也不能只靠退出时写一次
+  // （进程被杀就全丢了）。最小化时 captureWindowState 返回 null，
+  // 不会把 Windows 那个 -32000 的假坐标存进档。
+  for (const eventName of ['resize', 'move', 'maximize', 'unmaximize', 'restore']) {
+    win.on(eventName, () => scheduleWindowStateSave(win));
+  }
 }
 
 function showMainWindow() {
@@ -165,8 +253,15 @@ function createTray() {
     isVisible: () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
     getOpenAtLogin: () => settings.openAtLogin,
     getLyricsToolState: () => (lyrics ? lyrics.status() : { status: 'idle' }),
+    // t6：播放状态（渲染进程上报后规范化的结果）——菜单文案与禁用态都读它
+    getPlayback: () => playback,
     onToggleWindow: () => toggleMainWindow(),
     onShowWindow: () => showMainWindow(),
+    // t6：托盘「播放/暂停」「上一首」「下一首」三个菜单项共用这一条发送路径
+    onPlaybackCommand: (type) => {
+      const result = sendPlaybackCommand(type);
+      if (!result.ok) console.log(`[desktop] 托盘播放命令未送达：${result.reason}`);
+    },
     onSetOpenAtLogin: (checked) => {
       // 菜单点击是同步回调：异步写盘，失败只记日志（托盘 UI 状态由 refresh 反映真实值）
       void setOpenAtLogin(checked).catch((error) => {
@@ -322,6 +417,8 @@ async function boot() {
     port: staticServer.port,
     token: staticServer.token,
     startedAt: new Date().toISOString(),
+    // t6：渲染进程上报播放状态（shell:status）→ 存下并刷新托盘菜单文案
+    onShellStatus: (raw) => applyPlaybackStatus(raw),
   });
 
   // t5：补歌词 IPC（lyrics:run/status/cancel）。目录选择对话框也从这里接，
@@ -382,7 +479,33 @@ async function boot() {
     console.warn(`[desktop] 已改用备用数据目录：${userDataChoice.dir}`);
   }
 
+  // t6：决定这次启动用哪个窗口几何。
+  // 存档必须先过 `screen.getAllDisplays()` 校验：多显示器用户拔掉副屏之后，
+  // 上次的坐标会落在一块已经不存在的屏幕上，窗口"打开了但看不见"。
+  // 越界就回退主屏居中默认尺寸，并把原因打进日志（验证脚本读 source/reason 自证）。
+  startupWindow = resolveStartupWindow({
+    saved: settings.windowState,
+    displays: screen.getAllDisplays(),
+    primaryDisplay: screen.getPrimaryDisplay(),
+  });
+  windowSaver = createDebouncedSaver({
+    save: (state) => {
+      try {
+        persistSettings({ windowState: state });
+      } catch (error) {
+        // 写盘失败不该影响播放/窗口（下次几何变化会再试）
+        console.error('[desktop] 窗口状态写盘失败：', error);
+      }
+    },
+  });
+  console.log(
+    `[desktop] 窗口几何来源 = ${startupWindow.source}（${startupWindow.reason}）` +
+      `${startupWindow.maximized ? '，存档要求最大化' : ''}`,
+  );
+
   createWindow();
+  // 存档说要最大化就在显示之前最大化，避免用户看到一次"从小变大"的跳动
+  if (startupWindow.maximized) mainWindow.maximize();
   await mainWindow.loadURL(`${staticServer.origin}/`);
   mainWindow.show();
 
@@ -429,6 +552,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('will-quit', () => {
+    // t6：兜底再落一次盘。正常路径是窗口 'close' 事件里存（那时窗口还活着，
+    // 能抓到真实几何）；走到这里如果还有防抖中的待写内容，就把它写掉。
+    saveWindowStateNow();
     tray?.destroy();
     void staticServer?.close();
     // t5：退出时把正在跑的补歌词工具整棵进程树杀掉——不杀的话
@@ -471,5 +597,22 @@ if (!app.requestSingleInstanceLock()) {
     // 托盘「选择补歌词工具…」/「指定音乐文件夹…」的真实处理函数（弹原生对话框并存档）
     chooseLyricsToolScript: () => lyrics?.chooseToolScript(),
     chooseLyricsMusicFolder: () => lyrics?.chooseMusicFolder(),
+    // ---- t6：托盘播放控制 + 窗口状态记忆（同样挂"菜单项调用的那批函数"）----
+    // 托盘「播放/暂停」「上一首」「下一首」三个菜单项的真实处理函数
+    playbackCommand: (type) => sendPlaybackCommand(type),
+    // 主进程侧记着的播放状态（渲染进程上报 → playbackStatus.js 规范化的结果）
+    readPlaybackStatus: () => ({ ...playback }),
+    // 本次启动的窗口几何决策：存档 / 实际采用 / 来源 / 原因 / 写盘计数
+    readWindowState: () => ({
+      saved: settings.windowState,
+      resolved: startupWindow ? startupWindow.bounds : null,
+      source: startupWindow ? startupWindow.source : null,
+      reason: startupWindow ? startupWindow.reason : null,
+      maximized: startupWindow ? startupWindow.maximized === true : false,
+      current: captureWindowState(mainWindow),
+      saveStats: windowSaver ? windowSaver.stats() : null,
+    }),
+    // 绕过防抖立刻落盘（验证脚本用；真退出路径走的也是这个函数）
+    saveWindowStateNow: () => saveWindowStateNow(),
   };
 }

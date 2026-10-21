@@ -216,10 +216,30 @@ async function main() {
     check(pageTitle === '轻音播放', '页面标题不被版本号污染', { pageTitle });
 
     const menuIds = (state0.menu ?? []).filter((m) => m.id).map((m) => m.id);
+    // 不再断言"精确全列表"：菜单会被后续任务继续加项（t5 的补歌词三项、t6 的播放三项
+    // 都进来过），精确比对每加一项就红一次，而这个脚本不在 `node --test` 范围内，
+    // 红了也没人知道（README §6）。改成断言**不变式**，一个都不放松：
+    //   ① 必备 id 全集都在；② quit 收尾；③ id 不重复；④ 分隔条不少于原有分组数
+    const requiredIds = [
+      'toggle-window', // t2：显示/隐藏窗口
+      'play-pause', // t6：托盘播放控制
+      'prev',
+      'next',
+      'fill-lyrics', // t5：补歌词
+      'lyrics-music-folder',
+      'lyrics-tool-settings',
+      'open-at-login', // t2：开机自启
+      'check-update', // t2：更新提示位（本期禁用）
+      'quit', // t2：真退出
+    ];
+    const missingIds = requiredIds.filter((id) => !menuIds.includes(id));
+    check(missingIds.length === 0, '托盘菜单结构完整（必备项一个不缺）', { missingIds, menuIds });
+    check(menuIds[menuIds.length - 1] === 'quit', '「退出」是菜单最后一项', { last: menuIds[menuIds.length - 1] });
+    check(new Set(menuIds).size === menuIds.length, '菜单项 id 不重复', { menuIds });
     check(
-      JSON.stringify(menuIds) === JSON.stringify(['toggle-window', 'open-at-login', 'check-update', 'quit']),
-      '托盘菜单结构完整（含真退出）',
-      { menuIds },
+      (state0.menu ?? []).filter((m) => m.type === 'separator').length >= 4,
+      '分组分隔条不少于 4 条（窗口/播放/补歌词/自启/更新/退出）',
+      { separators: (state0.menu ?? []).filter((m) => m.type === 'separator').length },
     );
     const updateItem = (state0.menu ?? []).find((m) => m.id === 'check-update');
     check(updateItem?.enabled === false, '更新菜单项禁用（预留位）', { updateItem });

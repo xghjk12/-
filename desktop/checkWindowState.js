@@ -35,6 +35,7 @@ const path = require('node:path');
 const { _electron } = require('playwright-core');
 const electronPath = require('electron');
 const { isOnDisplays, MIN_VISIBLE_PX } = require('./windowState.js');
+const { WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH } = require('./constants.js');
 
 const repoRoot = path.resolve(__dirname, '..');
 const desktopDir = path.join(repoRoot, 'desktop');
@@ -47,7 +48,7 @@ const facts = {};
 const mainLog = [];
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms);
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function check(condition, label, evidence) {
@@ -80,7 +81,7 @@ function closeEnough(actual, expected, tolerance = 8) {
   return true;
 }
 
-async function launch(tag) {
+async function launchOnce(tag) {
   const env = { ...process.env };
   // 坑 1：DSH 终端会把 ELECTRON_RUN_AS_NODE 传给子进程，带着它 electron 退化成纯 Node
   delete env.ELECTRON_RUN_AS_NODE;
@@ -105,6 +106,31 @@ async function launch(tag) {
   const win = await app.firstWindow({ timeout: 60000 });
   await win.waitForLoadState('domcontentloaded');
   return { app, win };
+}
+
+/**
+ * 启动（带重试）。
+ *
+ * 这台机器上连续多次启动 Electron 时，Playwright 的 CDP 连接偶尔会在应用已经
+ * 正常起来之后被重置（`WebSocket error: read ECONNRESET`，主进程日志显示 origin
+ * 与窗口几何都打印出来了，说明**不是产品问题**，是调试通道抖动）。
+ * 一个脚本要连开四次进程，撞上的概率不低，所以重试两次——但每次失败都记进
+ * 报告的 mainLog，不装作没发生。
+ */
+async function launch(tag) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await launchOnce(tag);
+    } catch (error) {
+      lastError = error;
+      const firstLine = String(error?.message ?? error).split('\n')[0];
+      mainLog.push(`[${tag}] 第 ${attempt} 次启动失败：${firstLine}`);
+      console.log(`  ! ${tag} 第 ${attempt} 次启动失败（${firstLine}），2 秒后重试`);
+      await sleep(2000);
+    }
+  }
+  throw lastError;
 }
 
 /** 走托盘「退出」那条真退出路径（会触发退出前落盘）。 */
@@ -169,8 +195,10 @@ async function main() {
     const target = {
       x: primary.workArea.x + 60,
       y: primary.workArea.y + 40,
-      width: Math.min(1180, primary.workArea.width - 120),
-      height: Math.min(760, primary.workArea.height - 120),
+      // 请求尺寸不能小于窗口的 minWidth/minHeight，否则 Electron 会夹一次，
+      // "存进去的和我请求的不一样"就成了假失败
+      width: Math.max(WINDOW_MIN_WIDTH, Math.min(1180, primary.workArea.width - 120)),
+      height: Math.max(WINDOW_MIN_HEIGHT, Math.min(760, primary.workArea.height - 120)),
     };
     facts.run1Target = target;
     await app.evaluate(
@@ -217,10 +245,16 @@ async function main() {
       '存档里存的是 getNormalBounds（不是整块屏幕的尺寸）',
       { saved: onDisk2.windowState, screenBounds: maximizedBounds.bounds },
     );
+    // 最大化/还原一来一回，Windows 会让"普通几何"漂十几个像素（不可见边框 + DPI 缩放），
+    // 所以这条用宽容差；真正要钉住的是上面那条：存的不是整块屏幕的尺寸。
     check(
-      closeEnough(onDisk2.windowState, { ...target, x: target.x + 12, y: target.y + 12 }),
-      '普通几何仍然是拖动之后的那个位置',
-      onDisk2.windowState,
+      closeEnough(
+        onDisk2.windowState,
+        { x: target.x + 12, y: target.y + 12, width: target.width, height: target.height },
+        40,
+      ),
+      '普通几何仍然是拖动之后的那个位置（容差 40px：Windows 边框/DPI 会漂）',
+      { saved: onDisk2.windowState, expected: target },
     );
 
     const exitCode = await quit(app);
@@ -264,8 +298,8 @@ async function main() {
     const next = {
       x: primary.workArea.x + 220,
       y: primary.workArea.y + 160,
-      width: Math.min(1024, primary.workArea.width - 240),
-      height: Math.min(700, primary.workArea.height - 240),
+      width: Math.max(WINDOW_MIN_WIDTH, Math.min(1024, primary.workArea.width - 240)),
+      height: Math.max(WINDOW_MIN_HEIGHT, Math.min(700, primary.workArea.height - 240)),
     };
     facts.run2Target = next;
     await app.evaluate(({ BrowserWindow }, bounds) => BrowserWindow.getAllWindows()[0].setBounds(bounds), next);
