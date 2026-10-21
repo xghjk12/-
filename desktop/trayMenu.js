@@ -1,0 +1,62 @@
+'use strict';
+
+/**
+ * 托盘菜单模板（纯数据，不 require electron）。
+ *
+ * 职责拆分：这里只产出「长什么样的菜单」，点击行为由 desktop/tray.js 在
+ * buildFromTemplate 之前按 id 注入。这样模板结构可以离开 electron 直接单测
+ * （desktop/trayMenu.test.cjs），真托盘的接线问题与文案问题分开修。
+ *
+ * 菜单结构（Windows 通知区右键）：
+ *   显示/隐藏窗口（随可见状态换文案）
+ *   ---
+ *   开机自启（checkbox）
+ *   ---
+ *   当前版本 / 新版本提示（本期禁用 = 预留位）
+ *   ---
+ *   退出
+ *
+ * @param {{ windowVisible: boolean, openAtLogin: boolean, version: string, updateAvailable: string | null }} state
+ * @returns {Array<object>} electron Menu 模板（不含 click，id 由 tray.js 消费）
+ */
+function buildTrayMenuTemplate({ windowVisible, openAtLogin, version, updateAvailable }) {
+  const items = [];
+
+  items.push({
+    id: 'toggle-window',
+    label: windowVisible ? '隐藏窗口' : '显示窗口',
+  });
+
+  items.push({ type: 'separator' });
+
+  items.push({
+    id: 'open-at-login',
+    label: '开机自启',
+    type: 'checkbox',
+    checked: openAtLogin === true,
+  });
+
+  items.push({ type: 'separator' });
+
+  // 更新提示位：本期明确不做自动更新（任务边界），菜单项始终禁用。
+  // 有更新源之后：updateAvailable 有值 → 换文案并启用，让 t2 之外的未来功能
+  // 只改这一个分支。
+  items.push({
+    id: 'check-update',
+    label: updateAvailable
+      ? `有新版本 v${updateAvailable} 可用`
+      : `当前 v${version} · 检查更新下一期提供`,
+    enabled: Boolean(updateAvailable),
+  });
+
+  items.push({ type: 'separator' });
+
+  items.push({
+    id: 'quit',
+    label: '退出',
+  });
+
+  return items;
+}
+
+module.exports = { buildTrayMenuTemplate };

@@ -15,13 +15,13 @@ const { APP_NAME } = require('./constants.js');
  *    也不能让页面里的一个链接把整个窗口导航到外部站点
  */
 function createMainWindow(options) {
-  const { distDir, show = true, width = 1440, height = 1000 } = options;
+  const { distDir, show = true, width = 1440, height = 1000, title = APP_NAME } = options;
 
   const iconPath = path.join(distDir, 'icons', 'icon-192.png');
   const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
 
   const win = new BrowserWindow({
-    title: APP_NAME,
+    title,
     width,
     height,
     minWidth: 900,

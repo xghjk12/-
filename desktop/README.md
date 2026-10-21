@@ -1,13 +1,15 @@
-# desktop/ —— 轻音播放桌面端壳（探路阶段成果）
+# desktop/ —— 轻音播放桌面端壳（探路 + t2 壳层实现成果）
 
-这一版**只做探路**：证明壳能跑起来、把 origin 定死、拿数据回答"关掉再开数据还在不在"，
-以及把文件系统桥（fs 桥）的最小设计写清楚。**托盘 / 关窗到托盘 / 开机自启 / 版本号界面都还没做**，
-那是实现阶段的事。
+t1 探路阶段证明了壳能跑起来、把 origin 定死、拿数据回答"关掉再开数据还在不在"，
+以及把文件系统桥（fs 桥）的最小设计写清楚（§3.5 实测后已降级为可选优化，本期不做）。
 
-边界：本阶段**没有改动** `src/core`、`src/ui`、`src/platform`，没有改 `package.json` 里任何已有脚本，
-只在根 `package.json` 的 devDependencies 里多了一条 `electron`（`pnpm add -D electron` 自己写进去的），
-其余全部是 `desktop/` 下的新增文件。`pnpm verify` 全绿：`Test Files 23 passed | 1 skipped`、
-`Tests 427 passed | 1 skipped (428)`、产物检查 4/4 通过（日志 `artifacts/desktop/verify.log`）。
+t2 实现阶段（本版）补齐桌面壳五件套：**托盘 / 关窗到托盘（音乐继续放）/
+单实例 / 开机自启 / 版本号**，全部用 `desktop/checkTray.js` 自动化验证通过
+（跑法与判定见 §1 与 §3.6，全量报告 `artifacts/desktop/tray-check.json`）。
+
+边界：没有改动 `src/core`、`src/ui`、`src/platform`，没有改 `package.json` 里任何已有脚本；
+新增了一条 `"test:desktop"` 脚本（跑 `desktop/*.test.cjs` 的 43 个单测，与 test:demo 同款写法），
+其余全部是 `desktop/` 下的新增/修改文件。`pnpm verify` 全绿记录见 §0。
 
 ---
 
@@ -19,8 +21,10 @@
 | origin 方案 | **选 (a) 主进程静态服务 + 固定 `http://127.0.0.1:53140`**；(b) `app://qingyin` 也实现了、也实测过，作为对照保留 |
 | 端口 | **53140，常量，绝不回退**（`desktop/constants.js` 的 `PORT`）。被占用就报错退出，因为换端口 = 换 origin = 用户数据"消失" |
 | origin 持久性 | **通过**。进程完全退出后重开，探针记录与 4 首曲目都还在（数据见 §3） |
-| fs 桥 | 设计见 §4，**未实现**（按要求只做设计） |
-| 本机三个坑 | ① 环境变量 `ELECTRON_RUN_AS_NODE=1` 会让 electron.exe 退化成纯 Node；② 必须命令行传 `--no-sandbox`；③ electron.exe 在用户目录（`C:\Users\...`）下建目录一律 EPERM，必须把 userData 指到可写位置。详见 §5，这三条**实现阶段一定会再踩** |
+| fs 桥 | 设计见 §4，**未实现**（§3.5 实测后降级为可选优化，本期不做） |
+| t2 五件套 | **全部做完并自动化验证通过**（§3.6）：托盘、关窗到托盘、单实例、开机自启、版本号 |
+| 开机自启的实现方式 | **自管 HKCU Run 注册表项**（`desktop/autoStart.js`），Electron 官方 `setLoginItemSettings` 在 44.9.1 静默失效——完整调查与验证桥接见 §8 |
+| 本机坑 | 坑 1-5 见 §5；t2 新增坑 6-10（PowerShell 自动变量、CDP 关窗陷阱、DSH 沙箱降权 Electron 子进程、僵尸进程、编辑器剥 BOM） |
 
 ---
 
@@ -52,6 +56,11 @@ node desktop/runProbe.js --both       # 两个都测并对比
 
 # (5) 用 Playwright 驱动**真入口**，断言窗口里渲染出了曲库（验收项，也是 t3 的技术路线预演）
 node desktop/checkWindow.js
+
+# (6) t2 五件套全量验证：托盘/关窗到托盘/单实例/开机自启/版本号
+node desktop/checkTray.js
+# 单元测试（纯函数 + 真注册表读写往返，43 个）：
+npm run test:desktop          # 即 node --test "desktop/*.test.cjs"
 ```
 
 `desktop/start.ps1` 支持的开关：`-Rebuild`（先构建再启动）、
@@ -270,6 +279,56 @@ node desktop/checkDirectoryPicker.js
    对话框），不要用。
 6. 运行注意：这个实验会把目标目录真的扫进 IndexedDB（曲库状态会变），驱动对话框
    时会短暂抢占鼠标与前台焦点（对话框需要真实置前）。
+
+### 3.6 t2 壳层五件套：实现与验证（2026-10-22）
+
+五个能力全部落在主进程侧，渲染进程一行没动（`?selftest=1` 的 `window.__qingyinTest`
+测试钩子继续可用，见下）：
+
+| 能力 | 实现 | 验证点 |
+| --- | --- | --- |
+| 托盘 | `desktop/tray.js`（图标取 `dist/icons/icon-192.png`，192→32 缩放；左键点图标=切换窗口，双击=总是显示）+ `desktop/trayMenu.js`（纯数据模板：显示/隐藏窗口、开机自启勾选、检查更新（禁用预留）、退出） | 托盘创建、菜单结构、tooltip `轻音播放 v0.1.0` |
+| 关窗到托盘 | `main.js` 的 `close` 事件 `preventDefault` + `hide()`；`quitApp()`（托盘退出）才真正退出 | 投递真实 WM_CLOSE 后：窗口隐藏不销毁、进程存活、静态服务响应、**音乐继续放** |
+| 单实例 | `app.requestSingleInstanceLock()`（锁的 key = userData 路径，所以二启必须传同一个 `--user-data-dir`） | 第二/第三个实例 exit 0、原窗口被唤回且只有 1 个窗口 |
+| 开机自启 | `desktop/autoStart.js` 自管 HKCU Run + StartupApproved（官方 API 失效，见 §8）+ `desktop/shellSettings.js`（`userData/settings.json` 是开关状态的真源） | settings.json 写入读回、菜单勾选、注册表写入读回（node 桥，§8） |
+| 版本号 | `desktop/appVersion.js` 读根 `package.json` 的 version（必须目录方式启动，见 `entry.js` 注释）→ `desktop/shellText.js` 把 ` v0.1.0` 拼进托盘 tooltip 与原生窗口标题（`page-title-updated` 拦截 + `setTitle`，页面标题不被污染） | 原生标题 `轻音播放 v0.1.0`、托盘 tooltip、菜单「当前 v0.1.0」 |
+
+**验证脚本 `node desktop/checkTray.js`**（Playwright 驱动真入口；全量判定与证据
+JSON 在 `artifacts/desktop/tray-check.json`，截图在 `artifacts/desktop/tray-*.png`）：
+
+1. **托盘与版本号**：`readState().trayCreated`、版本号来源、原生窗口标题带版本
+   （`BrowserWindow.getTitle()`）、页面标题无版本号污染、托盘菜单四项结构与文案。
+2. **显示/隐藏切换**：托盘 API 隐藏→窗口不可见但对象在→菜单文案翻转为「显示窗口」→
+   再显示→文案翻回「隐藏窗口」。
+3. **关窗到托盘（音乐不能停）**：先切到列表循环（内置样本只有 2 秒/首，队列模式
+   8 秒就放完停下，会把"仍在播放"误判成失败）→ 双击列表第一行真实播放 →
+   `desktop/postCloseToQingyin.ps1` 用 EnumWindows 找到轻音主窗口、投递 **WM_CLOSE**
+   （真实 X 按钮路径；CDP 的 `window.close()` 是绕过 close 事件陷阱的假路径，见坑 7）→
+   断言：窗口不可见、窗口对象还在（被拦截成 hide）、不触发退出流程、桌面顶层窗口
+   清单里没有轻音、进程存活、静态服务仍响应、主进程 `win.close()` 同样被拦截 →
+   等 5 秒 → 仍在播放且进度在走 → 全程渲染进程零报错。
+4. **二次启动（单实例）**：spawn 第二个实例（带同一个 `--user-data-dir`）→ exit 0、
+   原窗口被唤到前台、`BrowserWindow.getAllWindows()` 只有 1 个、原实例存活；
+   再在隐藏状态下三启 → 窗口被唤回。
+5. **开机自启（写 + 读回）**：见 §8 的完整说明（app 侧 settings.json + 菜单勾选 +
+   注册表写入读回走 node 桥 + 独立 reg query 复核 + 复位清理，不给这台机器留 Run 项）。
+6. **托盘退出**：`quit()` → 进程 exit 0 → 53140 端口释放（服务已关）。
+
+给自动化用的主进程句柄：`globalThis.__qingyinDesktopShell`（`readState` / `showMainWindow` /
+`hideMainWindow` / `toggleMainWindow` / `quit` / `setOpenAtLogin` / `readOsOpenAtLogin`）。
+只挂在主进程（sandbox + contextIsolation 下渲染进程够不到），托盘菜单项点击调用的
+就是这同一批函数——**自动化路径与真实用户路径走同一份代码**，t3 复验直接用它。
+
+人工复验清单（自动化之外，30 秒能过完）：
+
+- [ ] `powershell -ExecutionPolicy Bypass -File desktop/start.ps1` 启动；
+- [ ] 点一曲播放，点窗口 X：窗口消失、音乐不停；
+- [ ] 任务栏右下角托盘图标（左键=显隐切换，右键=菜单）；标题栏/托盘悬浮显示版本号；
+- [ ] 再开一个同样的启动命令：不弹第二个窗口，原窗口被唤到前台；
+- [ ] 托盘菜单勾「开机自启」，到任务管理器→启动应用里看「qingyin-player」变为"已启用"
+      （或 `reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v qingyin-player`）；
+      取消勾选后该项消失；
+- [ ] 托盘菜单「退出」：托盘图标消失、进程退出。
 
 
 ---
@@ -519,6 +578,58 @@ pwsh 7 默认按 UTF-8 读，所以同一个文件在 7 下没问题——这种
 
 处理：`desktop/start.ps1` 已存成 UTF-8 with BOM（`EF BB BF`），5.1 与 pwsh 7 的
 `Parser::ParseFile` 都验证过解析通过。**以后往 `desktop/` 加 `.ps1` 一律带 BOM。**
+t2 补充坑：**编辑器/写入工具保存 `.ps1` 时会剥掉 BOM**（本文件 §3.6 的
+`postCloseToQingyin.ps1` 被改了两次、剥了两次），每次编辑完都要重查三字节头并补回。
+
+### 坑 6（t2）：PowerShell 的 `$matches` 是自动变量，不能当数组用
+
+`postCloseToQingyin.ps1` 里用 `$matches += [pscustomobject]@{...}` 收集窗口，报
+`A hash table can only be added to another hash table`——`$matches` 是 `-match`
+操作符的结果 hashtable（自动变量）。换成 `$hits` 就好。写 PS 时避开
+`$matches` / `$args` / `$input` / `$error` 这些自动变量名。
+
+### 坑 7（t2）：CDP 的 `window.close()` 不是用户关窗路径，会绕过 close 事件
+
+`page.evaluate(() => window.close())` 走的是 DevTools 强制关闭路径：直接销毁
+WebContents，**不触发** `BrowserWindow` 的 `close` 事件（`preventDefault` 根本没机会跑），
+还会触发 `window-all-closed`——测"关窗到托盘"用它会得到假结论（窗口真死了）。
+真实用户点 X 的路径是 Win32 `WM_CLOSE (0x0010)` 投到 `Chrome_WidgetWin_1` 顶层窗口，
+`desktop/postCloseToQingyin.ps1` 就是干这个的。注意匹配标题要用 `Contains`
+不能用 `StartsWith`（播放中标题是 `歌名 - 轻音播放 v0.1.0`）。
+
+### 坑 8（t2，最费解的一个）：DSH 沙箱会降权 Electron 的子进程（写注册表"拒绝访问"）
+
+在本 DSH harness 里启动的 electron（无论 Playwright 还是 node spawn），它再 spawn 的
+子进程（reg.exe）**能跑但被降权**：`reg add` 报 `拒绝访问`、`reg export` 连临时
+`.reg` 文件都写不了；而 electron 主进程自己写普通文件（settings.json）没问题，
+同一条 reg 命令从纯 Node 进程 spawn 则完全正常。叠加发现：
+
+- `app.setLoginItemSettings`（Electron 原生注册表写入）在本环境**静默无效**（三变体
+  全不落盘）——见 §8；
+- `spawn` 用 `stdio:'ignore'` 会让 electron **直接崩**（0xC0000005），用管道 stdio 则
+  只是降权不崩——所以 `autoStart.js` 的 `regRun` 固定用管道；
+- `Start-Process` 启动 electron 会把受限 pwsh 会话整个**挂死**（两次复现）。
+
+结论：这是**验证环境的限制，不是代码缺陷**——用户双击启动的 app 没有这层沙箱。
+验证桥接方案见 §8。另外：node 直接 spawn electron（stdio ignore）会秒崩 0xC0000005，
+裸 `.cjs` 当 app（无 package.json 上下文）也会崩——都别用，统一走 Playwright
+`_electron.launch` + 目录方式启动。
+
+### 坑 9（t2）：崩溃的 electron 会留杀不掉的僵尸进程
+
+强杀 pwsh 任务（job_kill）或探针崩了没 `app.close()`，都会留下 `HasExited=True`
+但 `Get-Process` 仍列出的僵尸（父进程没了、没人收割）。它们不占端口不占 CPU，
+`Stop-Process -Force` 与 `taskkill /F` 都报拒绝访问，重启才消失。每次跑
+`checkTray.js` 前先
+`Get-Process electron | Where-Object { -not $_.HasExited } | Stop-Process -Force`
+清掉**活的**实例（判断"有没有在跑"永远看 `Get-NetTCPConnection -LocalPort 53140 -State Listen`）。
+
+### 坑 10（t2）：`node --test` 的目录形式不能用
+
+`node --test desktop/` 会把目录当单个测试文件加载（非测试模块也被 require，
+`require('electron')` 直接炸）。要用文件列表或 glob 引号形式：
+`node --test "desktop/*.test.cjs"`（Node 24 会自己展开 glob，npm scripts 里也行）。
+另注意根 `package.json` 是 `"type":"module"`，`desktop/` 之外写的临时脚本要存 `.cjs`。
 
 ---
 
@@ -547,8 +658,25 @@ pwsh 7 默认按 UTF-8 读，所以同一个文件在 7 下没问题——这种
 | `desktop/start.ps1` | 一键启动，自动处理坑 1 与坑 2 |
 | `desktop/smoke.js` / `desktop/smoke2.js` | 崩溃二分器（§5 坑 3 的证据来源）。换机器排障时还有用，所以留着 |
 
+t2 新增/修改（壳层五件套）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `desktop/main.js`（改） | 五件套总装：userData 钉死、settings 载入、`close` 拦截成 hide、`page-title-updated` 原生标题带版本、单实例锁 + 二启唤回、托盘装配、自启同步（§8）、`window-all-closed` 保进程、`will-quit` 清理、`__qingyinDesktopShell` 验证句柄 |
+| `desktop/appVersion.js`（新） | 纯函数：读根 `package.json` 的 version（单测覆盖） |
+| `desktop/shellSettings.js`（新） | 纯函数：`userData/settings.json` 的 load/save（原子写、未知键丢弃、单测覆盖） |
+| `desktop/shellText.js`（新） | 纯函数：托盘 tooltip / 原生标题拼版本号（幂等，单测覆盖） |
+| `desktop/trayMenu.js`（新） | 纯函数：托盘菜单模板（不含 handler，接线归 tray.js，单测覆盖） |
+| `desktop/tray.js`（新） | Electron 侧：Tray 创建/刷新/销毁、点击行为、`describe()` 菜单快照（验证用） |
+| `desktop/autoStart.js`（新） | Windows 自启：自管 HKCU Run + StartupApproved（§8），`reg export` 精确读回 + `reg query` 存在性兜底（单测含真注册表读写往返） |
+| `desktop/window.js`（改） | `createMainWindow` 接受 `title` 选项 |
+| `desktop/checkTray.js`（新） | t2 全量验证脚本（§3.6，报告落 `artifacts/desktop/tray-check.json`） |
+| `desktop/postCloseToQingyin.ps1`（新） | 向轻音主窗口投递真实 WM_CLOSE（坑 6/7 的经验都在里面） |
+| `desktop/appVersion.test.cjs` / `shellSettings.test.cjs` / `shellText.test.cjs` / `trayMenu.test.cjs` / `autoStart.test.cjs`（新） | 43 个单测（`npm run test:desktop`） |
+
 **没动过**：`src/core`、`src/ui`、`src/platform`、`scripts/`、`vite.config.ts`、
-`package.json` 里已有的脚本（只有 pnpm 自己往 devDependencies 里写的 `electron` 一行）。
+`package.json` 里已有的脚本（t2 在 scripts 里**新增**了 `"test:desktop"` 一条，
+devDependencies 里的 `electron` 是 pnpm 自己写的）。
 
 ---
 
@@ -563,8 +691,75 @@ pwsh 7 默认按 UTF-8 读，所以同一个文件在 7 下没问题——这种
 4. **没有 CSP**（Electron 每次启动都警告）。我们的静态服务正好能下发响应头，建议实现阶段补上。
 5. ~~**`showDirectoryPicker` 在壳里存在但未验证能否弹窗**（§3）~~。
    **已实测（§3.5）：能弹、能选、能扫描，桌面端不需要 fs 桥也能用。**
-6. **托盘 / 关窗到托盘 / 单实例 / 开机自启 / 版本号界面全部未做**。
-   单实例锁已经有了（`main.js`），托盘与 `app.setLoginItemSettings` 是新增工作；
-   版本号直接用 `app.getVersion()`——但前提是**用目录方式启动**（见 `entry.js` 的注释），否则显示成 `44.9.1`。
-7. 当前 `window-all-closed` 是 `app.quit()`，实现"关窗到托盘"时要改成只隐藏窗口，
-   并额外处理 `before-quit` / 托盘菜单退出，别让后台播放被顺手杀掉。
+6. ~~**托盘 / 关窗到托盘 / 单实例 / 开机自启 / 版本号界面全部未做**~~。
+   **t2 已做完并全量验证（§3.6）**；`app.setLoginItemSettings` 的替代方案与验证桥见 §8。
+7. ~~当前 `window-all-closed` 是 `app.quit()`，实现"关窗到托盘"时要改成只隐藏窗口~~。
+   **已改**：`window-all-closed` 现在只警告不退出（托盘 + 后台播放保活），
+   真退出走托盘菜单「退出」/ `before-quit`。
+8. **开机自启的打包态没测过**：`loginItemArgs()` 打包后返回 `[]`（直接 `app.exe`），
+   命令拼装逻辑一样，但没有打包产物可验——留给发布阶段（当前不做打包）。
+9. **注册表写入的"用户双击"路径没法在本 harness 内验证**（坑 8 的降权），
+   node 桥证明了命令与读写逻辑（§8），真人路径留给 t3 人工清单。
+10. Service Worker 与 CSP 的遗留项见 §7.3/§7.4，未动。
+
+---
+
+## 8. 开机自启：为什么不用 `app.setLoginItemSettings`，以及怎么验证的（2026-10-22 调查记录）
+
+### 8.1 官方 API 静默失效（三个变体全试过）
+
+`app.setLoginItemSettings({ openAtLogin: true })` 及其变体（显式 `path`+`args`、
+显式 `name: 'qingyin-player'`、外加先 `app.setAppUserModelId`）在 Electron 44.9.1
+本机实测**全部静默无效**：
+
+- `HKCU\...\CurrentVersion\Run` 一个新值都没有（reg query 全量核对过）；
+- `HKCU\...\Explorer\StartupApproved\Run` 同样没有；
+- `schtasks` 里也没有对应计划任务；
+- `getLoginItemSettings({path, args})` 读回永远是 `openAtLogin:false`、
+  `launchItems: []`、`executableWillLaunchAtLogin:false`。
+
+对照：electron.exe 二进制里确实存在 `Software\Microsoft\Windows\CurrentVersion\Run`、
+`...\Explorer\StartupApproved\Run`、`user`/`machine` 与 `electron.app.$1` 模板字符串
+（UTF-16 字符串扫描），说明实现代码在；同机上另一个老版本 Electron 应用
+（方格音乐）当年就写成了 `electron.app.方格音乐`。为什么 44.9.1 在我们的开发态
+不落盘，没有结论（44 的 login items 刚重构过，`Settings` 接口新增了 `name`/`enabled`，
+读侧只剩 `path`/`args`）。**与其赌上游，不如自己写**——这就是 `desktop/autoStart.js`。
+
+### 8.2 自管 Run 项的设计
+
+- 值名固定 `qingyin-player`（`constants.APP_ID`）；
+- Run 值 = `"<process.execPath>" [args…]`（`buildRunCommand`：exe 恒定加引号，
+  含空格/中文的参数也加引号；未打包时 args = `["<desktop 目录>", "--no-sandbox"]`，
+  打包后为 `[]`）；
+- 同步写 `StartupApproved\Run` 同名 `REG_BINARY` = `02 00 00 00 …`（"已启用"，
+  与任务管理器的启动应用列表显示一致）；
+- 读回用 `reg export` 到临时文件再按 UTF-16LE 解析（`.reg` 转义还原）——
+  **不能用 `reg query` 的 stdout 做精确比对**：它走 OEM 代码页，中文路径必乱码；
+  存在性检查（`readLoginItemPresent`）才用 `reg query`；
+- 删除 = 两个键的同名值都删（值本来就不存在也算成功）；
+- 开关状态真源是 `userData/settings.json`（`shellSettings.js`），OS 侧尽力同步、
+  失败不抛给 UI（记日志，下次切换重试）。
+
+### 8.3 验证桥接（为什么 checkTray 里注册表是 node 侧写的）
+
+坑 8：DSH 沙箱会把 harness 内 electron 的子进程降权（reg 写"拒绝访问"），app 侧
+写注册表在这个环境里**注定失败**——但用户双击启动的 app 没有这层限制。所以
+`checkTray.js` §5 分两层验：
+
+1. **app 层**（证明开关行为）：`setOpenAtLogin(true)` → settings.json 写入且读回、
+   托盘菜单勾选、`readState().loginItemCommand` 报出将要写入的完整命令；
+   写入失败会在主进程日志留痕（"注册表自启写入失败"）。
+2. **node 桥层**（证明注册表写入与读回本身）：用 app 报出的同一份命令，在
+   node 侧（不受降权影响）调用**同一个 `autoStart.js` 模块**执行
+   `enableLoginItem` → `readLoginItemCommand` 精确比对 → 独立 `reg query` 复核 →
+   `StartupApproved` 存在 → 再让 app 侧 `readOsOpenAtLogin()`（存在性模式）感知到 →
+   复位时 node 侧删值、读回为空。
+
+也就是说：**命令怎么拼（app 算的）、注册表怎么写怎么读回（同模块跑）两条都验了**，
+唯一没法在本环境内证明的只剩"harness 外的 electron 进程有权限执行这个 spawn"——
+这层留给 t3 的人工清单（托盘勾选 → 任务管理器看启动应用状态）。
+
+### 8.4 复现调查的探针已清理
+
+调查期间用的临时探针（`artifacts/desktop/tmp-login-*.cjs`、`tmp-auto-*.cjs`、
+`tmp-probe*.cjs`、`tmp-binary-strings.cjs` 等）验证完已删除；结论都在本节与坑 8 里。

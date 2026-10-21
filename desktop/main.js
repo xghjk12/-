@@ -4,13 +4,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { app, dialog } = require('electron');
 const constants = require('./constants.js');
+const { readAppVersion } = require('./appVersion.js');
 const { installDesktopIpc } = require('./mainIpc.js');
 const { createStaticServer } = require('./staticServer.js');
 const { pinUserData } = require('./userData.js');
 const { createMainWindow } = require('./window.js');
+const { createAppTray } = require('./tray.js');
+const { loadSettings, saveSettings } = require('./shellSettings.js');
+const { titleWithVersion, trayTooltip } = require('./shellText.js');
+const {
+  buildRunCommand,
+  enableLoginItem,
+  disableLoginItem,
+  readLoginItemCommand,
+  readLoginItemPresent,
+} = require('./autoStart.js');
 
 /**
- * 桌面端入口（探路阶段的最小版本）。
+ * 桌面端入口（t2：托盘 / 关窗到托盘继续放歌 / 单实例 / 开机自启 / 版本号）。
  *
  * 启动顺序有讲究：
  *  1. **ready 之前**把 userData 钉死（见 constants.js 的 APP_ID 注释）
@@ -18,18 +29,32 @@ const { createMainWindow } = require('./window.js');
  *     —— 绝不用 `file://`：那样 origin 是 opaque(null)，IndexedDB 不可用，用户数据等于不存在
  *  3. 单实例锁：两个实例抢同一个固定端口没有意义，第二个实例应该把第一个唤到前台
  *
- * 托盘 / 关窗继续放歌 / 开机自启都不在这里——那是实现阶段的事。
- * 现在 `window-all-closed` 就是退出。
+ * 关窗到托盘的关键不变式：**close 一律拦截成 hide，渲染进程绝不能销毁**——
+ * 音频在渲染进程里播，窗口一销毁音乐就停，托盘就成了空壳。真正的退出只有
+ * 托盘菜单「退出」（和系统会话结束）两条路，走 isQuitting 标志放行。
  */
 
 // ---- ready 之前：钉死身份与数据目录（顺序不能动，详见 userData.js 的注释）----
 const userDataChoice = pinUserData();
+// pinUserData 内部已经 setPath，这之后 getPath('userData') 才安全（坑 1）
+const userDataDir = app.getPath('userData');
 
 const repoRoot = path.resolve(__dirname, '..');
 const distDir = path.join(repoRoot, constants.DIST_DIRNAME);
 
+// 版本号唯一真相是仓库根 package.json；打包后（仓库不在了）才退回 app.getVersion()
+const appVersion = readAppVersion(repoRoot) ?? app.getVersion();
+
+// 更新提示位：本期明确不做自动更新（任务边界），恒 null。
+// 将来接更新源时把这里换成检查结果，托盘 tooltip / 菜单预留项会自动跟上
+// （trayMenu.js / shellText.js 里只有这一个分支消费它）。
+let updateAvailable = null;
+
 let mainWindow = null;
 let staticServer = null;
+let tray = null;
+let settings = loadSettings(userDataDir);
+let isQuitting = false;
 
 function fail(title, detail) {
   // showErrorBox 不依赖窗口，ready 前后都能用
@@ -47,6 +72,201 @@ function ensureDist() {
     return false;
   }
   return true;
+}
+
+// ---- 窗口管理：关窗 = 进托盘 ----
+
+function windowTitle() {
+  return titleWithVersion(constants.APP_NAME, appVersion, constants.APP_NAME);
+}
+
+function createWindow() {
+  const win = createMainWindow({ distDir, title: windowTitle() });
+  mainWindow = win;
+
+  // 关窗到托盘：**只隐藏，绝不销毁**（销毁 = 渲染进程死 = 音乐停）
+  win.on('close', (event) => {
+    if (isQuitting) return; // 真退出（托盘「退出」/系统会话结束）：放行
+    event.preventDefault();
+    win.hide();
+    tray?.refresh();
+  });
+
+  // 意外销毁（渲染进程崩溃重启等）也不丢对象引用
+  win.on('closed', () => {
+    if (mainWindow === win) {
+      mainWindow = null;
+      tray?.refresh();
+    }
+  });
+
+  // 页面自己会改标题（播放中显示「歌名 - 轻音播放」）：保留这个行为，
+  // 只在末尾补版本号，让版本始终对用户可见
+  win.on('page-title-updated', (event, title) => {
+    event.preventDefault();
+    win.setTitle(titleWithVersion(title, appVersion, constants.APP_NAME));
+  });
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    // 窗口没了（崩溃后的兜底路径）：重建一个
+    createWindow();
+    if (staticServer) {
+      void mainWindow.loadURL(`${staticServer.origin}/`);
+    }
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  tray?.refresh();
+}
+
+function hideMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.hide();
+  tray?.refresh();
+}
+
+function toggleMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+    hideMainWindow();
+  } else {
+    showMainWindow();
+  }
+}
+
+// ---- 托盘 ----
+
+function createTray() {
+  const iconCandidates = [
+    path.join(distDir, 'icons', 'icon-192.png'), // 构建产物
+    path.join(repoRoot, 'public', 'icons', 'icon-192.png'), // 开发目录回退
+  ];
+  const iconPath = iconCandidates.find((candidate) => fs.existsSync(candidate));
+  if (!iconPath) {
+    // 没图标托盘就是隐形的：宁可起不来，也不能让"关窗到托盘"变成把窗口藏到找不到
+    fail(
+      '缺少托盘图标',
+      `在 ${iconCandidates.join(' 或 ')} 都找不到 icon-192.png。\n\n` +
+        '先在仓库根目录执行 pnpm build（或 node scripts/make-icons.mjs）。',
+    );
+    return;
+  }
+  tray = createAppTray({
+    iconPath,
+    appName: constants.APP_NAME,
+    version: appVersion,
+    getUpdateAvailable: () => updateAvailable,
+    isVisible: () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
+    getOpenAtLogin: () => settings.openAtLogin,
+    onToggleWindow: () => toggleMainWindow(),
+    onShowWindow: () => showMainWindow(),
+    onSetOpenAtLogin: (checked) => {
+      // 菜单点击是同步回调：异步写盘，失败只记日志（托盘 UI 状态由 refresh 反映真实值）
+      void setOpenAtLogin(checked).catch((error) => {
+        console.error('[desktop] 设置开机自启失败：', error);
+      });
+    },
+    onQuit: () => quitApp(),
+  });
+}
+
+// ---- 开机自启 ----
+
+function loginItemArgs() {
+  if (app.isPackaged) return [];
+  // 未打包时开机启动的是 electron.exe，必须带上应用目录；--no-sandbox 见 README 坑 2
+  return [app.getAppPath(), '--no-sandbox'];
+}
+
+function loginItemCommand() {
+  return buildRunCommand(process.execPath, loginItemArgs());
+}
+
+/**
+ * 只读 OS 侧自启状态（不写任何东西）：托盘刷新/验证脚本用。
+ * 读回策略与 applyLoginItem 相同：精确（export）优先，存在性（query）兜底。
+ */
+async function readOsLoginItem() {
+  const options = { exePath: process.execPath, args: loginItemArgs(), name: constants.APP_ID };
+  const expected = buildRunCommand(options.exePath, options.args);
+  if (process.platform !== 'win32') {
+    return {
+      openAtLogin: app.getLoginItemSettings({ path: options.exePath, args: options.args }).openAtLogin === true,
+      command: null,
+      readMode: 'none',
+    };
+  }
+  try {
+    const command = await readLoginItemCommand(options);
+    return { openAtLogin: command !== null && command === expected, command, readMode: 'exact' };
+  } catch {
+    // reg export（要写临时文件）被环境限制时：只查存在性
+    const present = await readLoginItemPresent(options);
+    return { openAtLogin: present, command: present ? expected : null, readMode: 'presence' };
+  }
+}
+
+/**
+ * 把 openAtLogin 同步给操作系统并读回。
+ *
+ * Windows 走自管的 HKCU Run 项（autoStart.js）：Electron 44.9.1 的
+ * setLoginItemSettings 在本机实测静默失效（三变体全不落盘，见 README §8），
+ * 自己写注册表才可控可验证。其他平台仍走官方 API（本仓库只在 Windows 验证过）。
+ *
+ * 读回策略：优先 reg export（精确命令比对）；export 被环境限制时退回
+ * reg query 的存在性检查。写失败不抛给调用方（开关 UI 不该崩），只记日志——
+ * settings.json 是 UI 状态真源，OS 侧下次切换时会再同步。
+ *
+ * @returns {Promise<{ openAtLogin: boolean, command: string | null, readMode: 'exact' | 'presence' | 'none' }>}
+ */
+async function applyLoginItem(openAtLogin) {
+  const args = loginItemArgs();
+  if (process.platform === 'win32') {
+    const options = { exePath: process.execPath, args, name: constants.APP_ID };
+    if (openAtLogin) {
+      try {
+        await enableLoginItem(options);
+      } catch (error) {
+        console.error(`[desktop] 注册表自启写入失败（不影响开关状态，下次切换会重试）：${error}`);
+      }
+    } else {
+      await disableLoginItem(options);
+    }
+    // 读回以注册表为准（读策略见 readOsLoginItem）
+    return readOsLoginItem();
+  }
+  app.setLoginItemSettings({ openAtLogin, path: process.execPath, args, name: constants.APP_ID });
+  return {
+    openAtLogin: app.getLoginItemSettings({ path: process.execPath, args }).openAtLogin === true,
+    command: null,
+    readMode: 'none',
+  };
+}
+
+async function setOpenAtLogin(next) {
+  settings = saveSettings(userDataDir, { openAtLogin: next === true });
+  const osReadBack = await applyLoginItem(settings.openAtLogin);
+  console.log(
+    `[desktop] 开机自启 = ${settings.openAtLogin}（OS 读回 = ${osReadBack.openAtLogin}${osReadBack.readMode === 'presence' ? '，存在性模式' : ''}${osReadBack.command ? `，命令 = ${osReadBack.command}` : ''}）`,
+  );
+  tray?.refresh();
+  return {
+    settings: { ...settings },
+    osOpenAtLogin: osReadBack.openAtLogin,
+    readMode: osReadBack.readMode,
+    command: osReadBack.command,
+    settingsFile: path.join(userDataDir, 'settings.json'),
+  };
+}
+
+// ---- 退出 ----
+
+function quitApp() {
+  isQuitting = true;
+  app.quit();
 }
 
 async function boot() {
@@ -83,15 +303,22 @@ async function boot() {
 
   console.log(`[desktop] origin = ${staticServer.origin}`);
   console.log(`[desktop] userData = ${app.getPath('userData')}`);
+  console.log(`[desktop] 版本 = ${appVersion}（tooltip：${trayTooltip({ appName: constants.APP_NAME, version: appVersion, updateAvailable }).replace('\n', ' | ')}）`);
   if (userDataChoice.fellBack) {
     // 降级必须说出来：数据不在系统默认位置，用户（和后来排障的人）有权知道
     console.warn(`[desktop] 警告：${userDataChoice.reason}`);
     console.warn(`[desktop] 已改用备用数据目录：${userDataChoice.dir}`);
   }
 
-  mainWindow = createMainWindow({ distDir });
+  createWindow();
   await mainWindow.loadURL(`${staticServer.origin}/`);
   mainWindow.show();
+
+  createTray();
+  // 注意：这里不在启动时同步注册表（不做 boot 自愈）。原因：本机实测
+  // Electron 主进程启动早期 spawn reg.exe 会直接把进程崩掉（README §8），
+  // 开机自启的注册表写入只在用户切开关时发生（setOpenAtLogin），崩溃窗口
+  // 不落在启动路径上；settings.json 才是 UI 状态的唯一真源。
 }
 
 // ---- 单实例：固定端口下，第二个实例只会撞端口 ----
@@ -99,10 +326,9 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    // 关窗进托盘后音乐还在放：再点一次图标/快捷方式应该把窗口唤回来，
+    // 而不是把正在放歌的实例干掉、也不是再开一个窗口
+    showMainWindow();
   });
 
   app.whenReady().then(() => {
@@ -111,12 +337,56 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 
+  app.on('before-quit', () => {
+    // quit 从任何路径来（托盘退出、app.quit()、系统会话结束）都先把闸门打开
+    isQuitting = true;
+  });
+
+  app.on('session-end', () => {
+    // Windows 系统关机/注销：让 close 放行，别让 preventDefault 挡关机
+    isQuitting = true;
+  });
+
   app.on('window-all-closed', () => {
-    // 探路阶段：关窗即退。实现阶段会改成"关窗进托盘，继续放歌"。
-    app.quit();
+    if (isQuitting) return;
+    // 正常关窗走不到这里（close 被拦截成 hide）。走到这里说明窗口真的没了
+    // （渲染进程崩溃等）。不退出：托盘还在，点「显示窗口」会重建窗口，
+    // 用户的后台进程与曲库不该跟着消失。
+    console.warn('[desktop] 所有窗口已关闭（意外路径），保留托盘，可从托盘重新打开窗口');
+    tray?.refresh();
   });
 
   app.on('will-quit', () => {
+    tray?.destroy();
     void staticServer?.close();
   });
+
+  // 给自动化验证用的主进程侧句柄（desktop/checkTray.js；t3 也会用）。
+  // 托盘菜单是 OS 层控件，Playwright 驱动不了，所以把菜单项会调用的
+  // **同一批函数**挂出来——自动化路径与真实用户路径走的是同一份代码。
+  // 只挂在主进程全局对象上，渲染进程（sandbox+contextIsolation）够不到。
+  globalThis.__qingyinDesktopShell = {
+    readState: () => ({
+      version: appVersion,
+      updateAvailable,
+      windowVisible: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
+      windowExists: Boolean(mainWindow && !mainWindow.isDestroyed()),
+      openAtLogin: settings.openAtLogin,
+      trayCreated: Boolean(tray),
+      menu: tray ? tray.describe() : [],
+      isQuitting,
+      // 自启 Run 项会写入的完整命令（验证脚本用它做 node 侧桥接复核，见 README §8）
+      loginItemCommand: loginItemCommand(),
+    }),
+    showMainWindow: () => showMainWindow(),
+    hideMainWindow: () => hideMainWindow(),
+    toggleMainWindow: () => toggleMainWindow(),
+    // 托盘「退出」菜单项的真实处理函数
+    quit: () => quitApp(),
+    // 托盘「开机自启」菜单项的真实处理函数（含 settings.json 落盘 + 注册表读写；
+    // 返回 Promise，验证脚本用 app.evaluate 会自动等它完成）
+    setOpenAtLogin: (open) => setOpenAtLogin(open),
+    // 只读 OS 侧自启状态（不写）：验证脚本读回用
+    readOsOpenAtLogin: () => readOsLoginItem(),
+  };
 }

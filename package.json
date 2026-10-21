@@ -12,6 +12,7 @@
     "preview": "vite preview --port 4173 --strictPort",
     "test": "vitest run",
     "test:demo": "node --test demo/core.test.cjs demo/ui-check.cjs",
+    "test:desktop": "node --test \"desktop/*.test.cjs\"",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "fixtures": "node scripts/make-fixtures.mjs",
