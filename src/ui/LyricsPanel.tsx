@@ -18,6 +18,7 @@ import { currentLineIndex, lyricSearchKeyword, buildLyricSearchUrl } from '../co
 import { effectiveOffsetSec, readLyricFile, useLyrics } from './lyrics.js';
 import { readLiveProgress, useAppStore } from './store.js';
 import { hasDesktopLyricsBridge, useDesktopLyrics } from './desktopLyrics.js';
+import type { DesktopLyricsToolStatus } from './desktopLyrics.js';
 import { CloseIcon, MusicIcon, SearchIcon, WarnIcon } from './Icons.js';
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -25,6 +26,27 @@ const SOURCE_LABEL: Record<string, string> = {
   import: '手动导入',
   paste: '粘贴的文本',
 };
+
+/**
+ * 状态行文案。cancelled 是**独立终态**：取消是用户主动行为，不带「失败」
+ * 字眼；done 叫完成；只有 failed 才叫失败（带退出码，用户拿它对工具日志）。
+ */
+function toolStatusText(status: DesktopLyricsToolStatus): string {
+  switch (status.status) {
+    case 'running':
+      return '补歌词工具运行中';
+    case 'done':
+      return '补歌词完成，已重新扫描';
+    case 'cancelled':
+      return '已取消补歌词';
+    case 'failed':
+      return status.exitCode !== null
+        ? `补歌词失败（退出码 ${status.exitCode}）`
+        : `补歌词失败${status.error ? `：${status.error}` : ''}`;
+    default:
+      return '';
+  }
+}
 
 /** 当前曲目的路径：优先播放队列里的当前项，否则用"上次播放"。 */
 function useCurrentPath(): string | undefined {
@@ -262,12 +284,9 @@ export function LyricsPanel() {
             </div>
             {desktopLyricsAvailable && desktopLyrics.status && desktopLyrics.status.status !== 'idle' && (
               <p className="lyrics-tool-status" data-tool-status={desktopLyrics.status.status}>
-                {desktopLyrics.status.status === 'running'
-                  ? '补歌词工具运行中'
-                  : desktopLyrics.status.status === 'done'
-                    ? '补歌词完成，已重新扫描'
-                    : `补歌词失败${desktopLyrics.status.error ? `：${desktopLyrics.status.error}` : ''}`}
-                {desktopLyrics.status.tail.length > 0 &&
+                {toolStatusText(desktopLyrics.status)}
+                {(desktopLyrics.status.status === 'running' || desktopLyrics.status.status === 'failed') &&
+                  desktopLyrics.status.tail.length > 0 &&
                   `（${desktopLyrics.status.tail[desktopLyrics.status.tail.length - 1]}）`}
                 {desktopLyrics.status.status === 'running' && (
                   <button className="btn btn-quiet" onClick={desktopLyrics.cancel}>

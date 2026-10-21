@@ -126,6 +126,32 @@ describe('桥存在（桌面端）', () => {
     expect(rescanMock).not.toHaveBeenCalled();
   });
 
+  it('cancelled 独立终态（t8）：不触发 rescan，通知是中性文案（不带失败字眼）', async () => {
+    const bridge = fakeBridge();
+    initDesktopLyrics(bridge);
+
+    bridge.push(statusOf({ status: 'running' }));
+    bridge.push(statusOf({ status: 'cancelled', finishedAt: Date.now(), error: null }));
+    expect(rescanMock).not.toHaveBeenCalled(); // 取消没扫出东西的语义
+
+    await vi.waitFor(() => {
+      const last = useAppStore.getState().notices.at(-1);
+      expect(last?.message).toContain('已取消');
+      expect(last?.message).not.toContain('失败');
+    });
+  });
+
+  it('cancelled 之后 close 事件的重复推送（同终态）不改任何状态', async () => {
+    const bridge = fakeBridge();
+    initDesktopLyrics(bridge);
+
+    bridge.push(statusOf({ status: 'running' }));
+    bridge.push(statusOf({ status: 'cancelled', finishedAt: Date.now() }));
+    bridge.push(statusOf({ status: 'cancelled', finishedAt: Date.now(), tail: ['残余输出'] }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(rescanMock).not.toHaveBeenCalled();
+  });
+
   it('init 幂等：调两次，桥只被订阅一次（每条状态只派发一份）', () => {
     const bridge = fakeBridge();
     expect(initDesktopLyrics(bridge)).toBe(true);

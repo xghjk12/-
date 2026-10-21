@@ -23,7 +23,7 @@ import { useAppStore } from './store.js';
 
 /** 主进程推过来的工具状态（与 desktop/lyricsTool.js 的快照形状一致）。 */
 export interface DesktopLyricsToolStatus {
-  status: 'idle' | 'running' | 'done' | 'failed';
+  status: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
   exitCode: number | null;
   scriptLabel: string | null;
   startedAt: number | null;
@@ -60,7 +60,7 @@ function emit() {
   for (const listener of listeners) listener(latest);
 }
 
-/** 终态里只有 done 触发重扫（failed 不扫：工具没成功，扫也扫不出新东西）。 */
+/** 终态里只有 done 触发重扫（failed/cancelled 不扫：没扫出东西的语义）。 */
 async function onStatusPushed(state: DesktopLyricsToolStatus) {
   const previous = latest?.status;
   latest = state;
@@ -73,6 +73,9 @@ async function onStatusPushed(state: DesktopLyricsToolStatus) {
       // 工具成功 → 自动重扫认领 .lrc（rescanLyrics 自己会推「新认领 N」统计）
       await store.rescanLyrics();
       store.pushNotice('补歌词完成，已重新扫描歌词');
+    } else if (state.status === 'cancelled') {
+      // 取消是用户主动行为：中性提示，绝不带「失败」字眼（终态语义与主进程一致）
+      store.pushNotice('已取消补歌词');
     } else if (state.status === 'failed') {
       const lastLine = state.tail.length > 0 ? `（${state.tail[state.tail.length - 1]}）` : '';
       store.pushNotice(`补歌词失败${state.error ?? ''}${lastLine}`, 'warn');

@@ -69,10 +69,12 @@ function buildTrayMenuTemplate({ windowVisible, openAtLogin, version, updateAvai
   items.push({ type: 'separator' });
 
   // 补歌词：t5。状态化文案——running 时再点会直接拒绝（主进程有 already-running 守卫），
-  // done/failed 提示上一轮结果，帮用户判断"刚才那次怎么样了"。
+  // done/failed/cancelled 提示上一轮结果，帮用户判断"刚才那次怎么样了"。
+  // cancelled 是独立终态（用户主动取消，t8）：文案不带「失败」字眼。
   let fillLabel = '补歌词…';
   if (lyricsToolStatus === 'running') fillLabel = '补歌词…（运行中）';
   else if (lyricsToolStatus === 'done') fillLabel = '补歌词…（上次成功）';
+  else if (lyricsToolStatus === 'cancelled') fillLabel = '补歌词…（上次已取消）';
   else if (lyricsToolStatus === 'failed') {
     fillLabel = '补歌词…（上次失败）';
   }

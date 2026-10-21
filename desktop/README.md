@@ -717,7 +717,7 @@ t5 新增/修改（补歌词，详见 §9）：
 | --- | --- |
 | `desktop/tools/fill-lyrics.ps1`（新） | 内置工具脚本：artifacts\lyricflow 的 venv python `-m src.main` + 根 README 实测过的那套环境变量；venv 缺失 → exit 2 + 安装指引；MusicPath 无效 → exit 3；退出码透传，UTF-8 输出 |
 | `desktop/tools/fake-fill-lyrics.ps1`（新） | 假工具（测试用）：给曲库里一首没有 .lrc 的音频写一个内容确定的 .lrc；exit 0/3/4；`-DelaySec` 供取消测试 |
-| `desktop/lyricsTool.js`（新） | 执行器：spawn powershell **无 shell**（纯 argv，无注入面）、尾部 40 行日志、`taskkill /T /F` 取整棵树、15 分钟超时、idle→running→done/failed 状态机（单测真实跑 powershell） |
+| `desktop/lyricsTool.js`（新） | 执行器：spawn powershell **无 shell**（纯 argv，无注入面）、尾部 40 行日志、`taskkill /T /F` 取整棵树、15 分钟超时、idle→running→done/failed/**cancelled** 状态机（cancelled 为独立终态 + 运行代号 token 防迟到事件污染，单测真实跑 powershell） |
 | `desktop/lyricsIpc.js`（新） | `lyrics:run/status/cancel` IPC + 路径解析（settings.musicFolderPath，没有就弹一次主进程目录对话框并存档）+ 工具脚本选择（settings.lyricsToolPath 空 = 内置） |
 | `desktop/preload.js`（改） | `window.qingyinDesktop.lyrics`：run/status/cancel/onStatus/getTrackPath |
 | `desktop/trayMenu.js`（改） | 菜单加「补歌词…（状态化文案）/指定音乐文件夹…/选择补歌词工具…」 |
@@ -857,7 +857,9 @@ preload 仍保留 `getTrackPath`（行为可查 + 将来若换曲库来源可直
       脚本：settings.lyricsToolPath 非空用它（测试指向假工具），空 → 内置
             desktop/tools/fill-lyrics.ps1（venv python -m src.main）
   → lyricsTool.js spawn powershell（无 shell、argv 数组、UTF-8、日志尾 40 行）
-  → 工具退出：0 → done；非 0 → failed（退出码透传，可读错误进日志尾）
+  → 工具退出：0 → done；非 0 → failed（退出码透传，可读错误进日志尾）；
+      用户取消 → cancelled（**独立终态**，t8：取消是主动行为不是故障，
+      界面显示「已取消」而非「失败」，error 为 null）
   → 状态推送 lyrics:status-changed（隐藏窗口也收得到，音乐不停）
   → 渲染进程 src/ui/desktopLyrics.ts：done → store.rescanLyrics()
       （重新遍历目录 → 认领新 .lrc →「歌词：认领 N 首」通知）
@@ -866,8 +868,13 @@ preload 仍保留 `getTrackPath`（行为可查 + 将来若换曲库来源可直
 安全/健壮性要点：spawn **不带 shell**（曲库路径是单个 argv 元素，无注入面）；
 取消走 `taskkill /PID <pid> /T /F`（powershell 是包装进程，只 kill 它会让
 python 变孤儿）；默认 15 分钟超时；`will-quit` 时杀运行中的工具树。
-失败的错误必须可读：venv 缺失 → exit 2 + 安装指引全文（LyricFlow 不进 git，
-新克隆机器上缺失是**正常路径**，指引比报错有用）；MusicPath 无效 → exit 3。
+**取消语义（t8 修正）**：cancelled 是独立终态且**单一真相**——cancel() 先把
+状态机推到终态再杀树，IPC 返回的快照 / status 查询 / 状态推送是同一份；杀树
+后子进程**迟到的 close 事件不许改状态**（每轮 spawn 带运行代号 token，旧轮
+事件直接丢弃——这同时防住「取消后立刻再跑一轮，旧 close 把新一轮改成
+failed」的竞态，单测里有这一幕）。失败错误必须可读：venv 缺失 → exit 2 +
+安装指引全文（LyricFlow 不进 git，新克隆机器上缺失是**正常路径**，指引比
+报错有用）；MusicPath 无效 → exit 3。
 
 ### 9.3 顺手修掉的预存 bug：`rescanLyrics` 快照失效（web 版同受益）
 
@@ -904,8 +911,11 @@ node desktop/checkLyricsTool.js       # 报告 artifacts/desktop/lyrics-tool.jso
    渲染进程自动认领（`readLyrics` 非空）→ 重扫通知出现 → 双击曲目打开面板
    → **面板里显示假工具写的那句**；
 2. **失败传播**：换成 exit 3 的工具 → failed + 退出码透传 + 可读错误进日志尾；
-3. **取消**：30 秒慢工具 → running → 渲染进程 `window.qingyinDesktop.lyrics.cancel()`
-   → failed +「已取消」。
+3. **取消**：30 秒慢工具（先拉一个带 marker 的 venv python 子进程）→ running
+   → 渲染进程 `window.qingyinDesktop.lyrics.cancel()` → **独立终态 cancelled**
+   （内外状态一致：IPC 快照与轮询结果都是 cancelled、finishedAt 有值、
+   error 为 null）→ 面板状态行「已取消」（不带失败字眼）→ 取消后 3 秒查
+   进程表：慢工具的 powershell/python **0 残留**（`taskkill /T` 真把树杀干净）。
 
 本环境的重要事实：**坑 8 的"子进程降权"没有拦住 D:\ 上的文件写**（reg 写
 HKCU/用户目录 temp 被拒，但 electron→powershell→写 `artifacts/` 完全正常）——

@@ -99,12 +99,12 @@ test('运行中守卫：第二次 run 被拒绝（already-running），不会并
 
   // 收尾：取消慢脚本（顺带验证取消路径），别让测试挂着 30 秒
   runner.cancel();
-  await waitForStatus(runner, 'failed');
-  // 取消不在运行态时是 no-op
+  await waitForStatus(runner, 'cancelled');
+  // 取消不在运行态时是 no-op（幂等）
   assert.equal(runner.cancel().cancelled, false);
 });
 
-test('取消：taskkill 杀整棵树，状态定调为 failed + 已取消', async () => {
+test('取消是独立终态 cancelled（t8）：不是 failed，内外单一真相', async () => {
   const runner = createLyricsToolRunner({ defaultScriptPath: FAKE_TOOL });
   const musicDir = tmpMusicDir();
   const slow = slowTool();
@@ -114,11 +114,97 @@ test('取消：taskkill 杀整棵树，状态定调为 failed + 已取消', asyn
   assert.equal(runner.status().status, 'running');
 
   const cancelResult = runner.cancel();
+  // 单一真相：cancel 的返回值、status() 查询、之后的推送必须是同一个终态——
+  // 不允许再出现"外层一个状态 / 内层 running"两个 source of truth
   assert.equal(cancelResult.cancelled, true);
+  assert.equal(cancelResult.status.status, 'cancelled', 'cancel 返回的快照必须是终态');
+  assert.ok(cancelResult.status.finishedAt !== null, 'cancelled 是终态：finishedAt 有值');
+  const after = runner.status();
+  assert.equal(after.status, 'cancelled');
+  assert.equal(after.error, null, '取消不是故障：error 不带「已取消」的失败语义');
 
-  const final = await waitForStatus(runner, 'failed');
-  assert.equal(final.status, 'failed');
-  assert.equal(final.error, '已取消');
+  // 杀树之后子进程的 close 事件还会来（最容易漏的竞态）：状态必须保持 cancelled，
+  // 不能被 close 改回 failed/done/running
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  const settled = runner.status();
+  assert.equal(settled.status, 'cancelled', `close 事件后状态被改了：${JSON.stringify(settled)}`);
+});
+
+test('重复取消是幂等的（已取消之后再调是 no-op，不报错不变状态）', async () => {
+  const runner = createLyricsToolRunner({ defaultScriptPath: FAKE_TOOL });
+  const musicDir = tmpMusicDir();
+  runner.run({ scriptPath: slowTool(), musicPath: musicDir });
+  assert.equal(runner.cancel().cancelled, true);
+
+  const second = runner.cancel();
+  assert.equal(second.cancelled, false, '第二次取消是 no-op');
+  assert.equal(second.status.status, 'cancelled', '状态保持在 cancelled 终态');
+});
+
+test('cancelled 是终态但不能卡死：可以再启动新一轮', async () => {
+  const runner = createLyricsToolRunner({ defaultScriptPath: FAKE_TOOL });
+  const musicDir = tmpMusicDir();
+
+  runner.run({ scriptPath: slowTool(), musicPath: musicDir });
+  runner.cancel();
+  assert.equal(runner.status().status, 'cancelled');
+
+  // 取消之后立即可再跑（比如用户发现选错目录，取消换参数再来）。
+  // 关键：旧一轮被杀进程的迟到 close 事件不许把新一轮的状态改坏（t8 竞态）。
+  const next = runner.run({ scriptPath: FAKE_TOOL, musicPath: musicDir });
+  assert.equal(next.started, true, 'cancelled 之后必须能再次启动');
+  assert.equal(next.status.status, 'running');
+  // 慢工具没写文件 → 这轮假工具真的写（exit 0），不是 exit 4
+  const final = await waitForStatus(runner, 'done');
+  assert.equal(final.status, 'done', `新一轮的终态：${JSON.stringify(final)}`);
+  assert.equal(final.exitCode, 0);
+  assert.ok(fs.existsSync(path.join(musicDir, '测试曲.lrc')), '第二轮确实把 .lrc 写出来了');
+});
+
+test('取消真的杀掉整棵进程树：powershell 的子进程不能变孤儿', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qingyin-tree-kill-'));
+  // marker 必须出现在**子进程的命令行**里（python -c 的参数），进程表才能查到它：
+  // 只写进脚本正文（Write-Output）是查不到的——那条只进日志。
+  const marker = `treekill${process.pid}_${Date.now()}`;
+  const script = path.join(dir, 'tree-slow.ps1');
+  const venvPython = path.join(__dirname, '..', 'artifacts', 'lyricflow', '.venv', 'Scripts', 'python.exe');
+  // 优先用 venv 的真 python（和 LyricFlow 的真实形状一致：powershell 包一层，python 是孙进程）；
+  // 机器上没有 venv 时退化为孙 powershell（同样验证 /T 的递归杀）
+  const pyCode = `import time; time.sleep(90) # ${marker}`;
+  const childCmd = fs.existsSync(venvPython)
+    ? `& '${String(venvPython).replace(/'/g, "''")}' -c '${pyCode.replace(/'/g, "''")}'`
+    : `Start-Process powershell -ArgumentList '-NoProfile','-Command','Write-Host ${marker}; Start-Sleep -Seconds 90' -Wait`;
+  fs.writeFileSync(
+    script,
+    `Write-Output 'tree slow started'\n${childCmd}\nWrite-Output 'tree slow finished'\n`,
+    'utf8',
+  );
+
+  const runner = createLyricsToolRunner({ defaultScriptPath: script });
+  runner.run({ scriptPath: script, musicPath: tmpMusicDir() });
+  assert.equal(runner.status().status, 'running');
+
+  assert.equal(runner.cancel().cancelled, true);
+  // 给 taskkill 一点时间，然后查进程表：命令行带 marker 的进程一个都不许活着
+  // （powershell 包装进程带脚本路径，python 孙进程带 marker——两条都查）
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  const { execFileSync } = require('node:child_process');
+  let pids = '';
+  try {
+    pids = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-Command',
+        `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*${marker}*' -or $_.CommandLine -like '*${script}*') } | ForEach-Object { $_.ProcessId }`,
+      ],
+      { encoding: 'utf8', timeout: 30000 },
+    );
+  } catch (error) {
+    assert.fail(`进程表查询失败：${error}`);
+  }
+  const survivors = pids.split(/\s+/).filter((token) => /^\d+$/.test(token));
+  assert.equal(survivors.length, 0, `取消后还有进程活着（marker=${marker}）：${survivors.join(', ')}`);
 });
 
 test('上一轮结果能再启动（done 之后可以再跑）', async () => {

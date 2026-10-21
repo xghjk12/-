@@ -43,6 +43,11 @@ test('补歌词项：默认可点，running 时换文案且禁用', () => {
 
   assert.match(byId(templateOf({ lyricsToolStatus: 'done' }), 'fill-lyrics').label, /上次成功/);
   assert.match(byId(templateOf({ lyricsToolStatus: 'failed' }), 'fill-lyrics').label, /上次失败/);
+  // cancelled 是独立终态（t8）：文案「上次已取消」——不能带「失败」字眼
+  const cancelled = byId(templateOf({ lyricsToolStatus: 'cancelled' }), 'fill-lyrics');
+  assert.match(cancelled.label, /上次已取消/);
+  assert.doesNotMatch(cancelled.label, /失败/, '取消是主动行为，托盘文案不许叫失败');
+  assert.notEqual(cancelled.enabled, false, '取消后可以立刻再跑一轮');
 });
 
 test('补歌词的路径设置入口：两个菜单项都在且可点', () => {

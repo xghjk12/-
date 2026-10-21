@@ -8,8 +8,11 @@ const { createLyricsToolRunner } = require('./lyricsTool.js');
  * 补歌词的 IPC 层（t5）：
  *  - `lyrics:run`    （invoke，渲染进程/托盘触发）启动工具
  *  - `lyrics:status` （invoke）当前状态快照
- *  - `lyrics:cancel` （invoke）取消
+ *  - `lyrics:cancel` （invoke）取消——返回的 status 是终态快照
+ *    （cancelled 是独立终态，与 lyrics:status / 状态推送完全一致，单一真相）
  *  - `lyrics:status-changed`（事件，主 → 渲染）状态推送，渲染进程据此自动重扫
+ *
+ * 状态机：idle | running | done | failed | cancelled（取消是主动行为不是故障）。
  *
  * 音乐文件夹路径的解析顺序（checkPathForFile.js 实测：句柄来源的 File 拿不到
  * 绝对路径，webUtils.getPathForFile 返回空串，见 README §9）：

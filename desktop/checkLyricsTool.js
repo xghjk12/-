@@ -22,7 +22,8 @@ const { spawn } = require('node:child_process');
  * 另外两条路径：
  *   - 失败传播：换一个 exit 3 的工具 → running → failed，可读错误进日志尾
  *   - 取消：换一个 30 秒慢工具 → running → 渲染进程调 lyrics.cancel() →
- *     failed + 「已取消」，且没有写出文件
+ *     独立终态 cancelled（t8：不是 failed，内外单一真相），没有写出文件，
+ *     且慢工具拉起的子进程整棵树被杀掉（进程表 0 残留）
  *
  * 用法：node desktop/checkLyricsTool.js
  * 产物：artifacts/desktop/lyrics-tool.json
@@ -40,6 +41,8 @@ const MUSIC_FOLDER = path.join(artifactsDir, 'lyrics-e2e-music');
 const USER_DATA = path.join(artifactsDir, 'userdata-lyrics-check');
 const FAKE_TOOL = path.join(desktopDir, 'tools', 'fake-fill-lyrics.ps1');
 const SOURCE_FOLDER = 'D:\\轻音播放\\新建文件夹';
+/** 慢工具子进程命令行里的标记：取消后进程表里不允许再出现（杀树证据）。 */
+const SLOW_MARKER = `qingyine2ecancel${process.pid}`;
 
 const AUDIO_EXTENSIONS = /\.(mp3|flac|m4a|wav|ogg|wma|ape|strm)$/i;
 
@@ -74,18 +77,46 @@ function writeFailingTool() {
   return scriptPath;
 }
 
-/** 慢工具：30 秒后才写文件（给取消留窗口）。 */
+/** 慢工具：30 秒后才写文件（给取消留窗口）；并拉一个带 marker 的子进程——
+ *  取消必须把整棵树杀掉（powershell 是包装进程，子进程不能变孤儿）。 */
 function writeSlowTool() {
   const scriptPath = path.join(artifactsDir, 'lyrics-e2e-slow-tool.ps1');
+  const pyCode = `import time; time.sleep(90) # ${SLOW_MARKER}`;
+  const venvPython = path.join(repoRoot, 'artifacts', 'lyricflow', '.venv', 'Scripts', 'python.exe');
+  const childCmd = fs.existsSync(venvPython)
+    ? `& '${String(venvPython).replace(/'/g, "''")}' -c '${pyCode.replace(/'/g, "''")}'`
+    : `Start-Process powershell -ArgumentList '-NoProfile','-Command','Write-Host ${SLOW_MARKER}; Start-Sleep -Seconds 90' -Wait`;
   fs.writeFileSync(
     scriptPath,
-    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" +
+    '\uFEFF' +
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" +
       "Write-Output 'SLOW started'\n" +
+      `${childCmd}\n` +
       "Start-Sleep -Seconds 30\n" +
       "exit 0\n",
     'utf8',
   );
   return scriptPath;
+}
+
+/** 取消后查进程表：命令行带 marker 的进程数（含慢脚本本身）——0 才算杀干净。 */
+async function countProcessTree(marker) {
+  await sleep(3000); // 给 taskkill 留时间
+  const { execFileSync } = require('node:child_process');
+  try {
+    const out = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-Command',
+        `(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*${marker}*' -or $_.CommandLine -like '*lyrics-e2e-slow-tool*') } | Measure-Object).Count`,
+      ],
+      { encoding: 'utf8', timeout: 30000 },
+    );
+    return Number.parseInt(out.trim(), 10) || 0;
+  } catch {
+    return -1; // 查询失败：不误报，但也绝不能静默当 0（-1 会触发失败断言）
+  }
 }
 
 function writeSettings(toolPath) {
@@ -316,11 +347,40 @@ async function main() {
 
       // 渲染进程侧取消（preload 暴露的 IPC 通道，不是主进程直调）
       const cancelResult = await win.evaluate(() => window.qingyinDesktop.lyrics.cancel());
-      const final = await waitForLyricsState(app, 'failed');
+      const final = await waitForLyricsState(app, 'cancelled');
       console.log(`取消结果: ${JSON.stringify({ ipc: cancelResult, status: final?.status, error: final?.error })}`);
       facts.cancel = { status: final?.status, error: final?.error, exitCode: final?.exitCode };
-      if (cancelResult?.cancelled !== true || final?.status !== 'failed' || final?.error !== '已取消') {
-        problems.push(`取消路径不对：${JSON.stringify({ cancelResult, final })}`);
+      // t8 语义：取消是独立终态 cancelled（不是 failed）；且**内外一致**——
+      // IPC 返回的快照、轮询到的状态、都是同一个终态，不允许"外层 failed / 内层 running"
+      if (cancelResult?.cancelled !== true || final?.status !== 'cancelled') {
+        problems.push(`取消路径不对（应为独立终态 cancelled）：${JSON.stringify({ cancelResult, final })}`);
+      }
+      if (cancelResult?.status?.status !== 'cancelled' || cancelResult?.status?.finishedAt == null) {
+        problems.push(`IPC cancel 返回的快照不是终态（单一真相被破坏）：${JSON.stringify({ cancelResult })}`);
+      }
+      if (final?.finishedAt == null) {
+        problems.push(`cancelled 终态缺 finishedAt：${JSON.stringify(final)}`);
+      }
+      if (final?.error != null) {
+        problems.push(`cancelled 带 error（取消不是故障，不该有失败语义）：${JSON.stringify(final)}`);
+      }
+      // 面板状态行：cancelled 显示「已取消」，不许出现「失败」
+      const statusLine = await win.evaluate(() => {
+        const line = document.querySelector('.lyrics-tool-status');
+        return line ? line.textContent ?? '' : null;
+      });
+      facts.cancelStatusLine = statusLine;
+      if (statusLine != null && /失败/.test(statusLine)) {
+        problems.push(`取消后的面板状态行不该带「失败」：${JSON.stringify(statusLine)}`);
+      }
+
+      // 杀树证据（t8 顺手项）：慢工具的 powershell/python 进程不许变孤儿。
+      // 慢脚本里拉了带 marker 的子进程，取消后 3 秒查进程表，一个都不许活着。
+      const treeSurvivors = await countProcessTree(SLOW_MARKER);
+      console.log(`取消后进程树残留: ${treeSurvivors} 个`);
+      facts.treeKillSurvivors = treeSurvivors;
+      if (treeSurvivors !== 0) {
+        problems.push(`取消没有杀干净进程树：还有 ${treeSurvivors} 个进程活着`);
       }
     } catch (error) {
       problems.push(`取消链路异常：${error instanceof Error ? error.message : String(error)}`);
