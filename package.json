@@ -21,7 +21,7 @@
     "check:static": "node scripts/check-ui-static.mjs",
     "check:ui": "node scripts/check-ui.mjs",
     "bench": "node scripts/bench-library.mjs",
-    "verify": "pnpm typecheck && pnpm test && pnpm test:demo && pnpm check:static && pnpm check:bundle"
+    "verify": "pnpm typecheck && pnpm test && pnpm test:desktop && pnpm test:demo && pnpm check:static && pnpm check:bundle"
   },
   "dependencies": {
     "idb": "^8.0.3",
