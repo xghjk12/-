@@ -113,6 +113,7 @@ src/ui/          React 组件 + Zustand store
 m0/              M0 手动验证页（pnpm dev:m0）
 demo/            交互原型（早期用于定交互，已由 src/ui 取代）
 tests/fixtures/  真实音频样本（ffmpeg 生成，已提交，pnpm test 不依赖本机 ffmpeg）
+docs/交接.md      接手这个项目的人/Agent 先看这份（状态、不变量、已定决定、未完成线索）
 ```
 
 依赖方向是硬约束：`ui → platform → core`，**`core` 里不允许出现任何平台 API**。
