@@ -179,6 +179,23 @@ async function main() {
         facts.tracksBefore = trackPaths;
         const trackPath = trackPaths[0];
 
+        // 先把音乐放起来：补歌词 + 自动重扫都**不许打断播放**（项目第一不变式）
+        await win.evaluate(async () => {
+          for (let i = 0; i < 5; i += 1) {
+            if (window.__qingyinTest.state().mode === 'repeat-all') return;
+            window.__qingyinTest.cycleMode();
+          }
+        });
+        await win.locator('.row').first().dblclick({ timeout: 15000 });
+        let playing = false;
+        for (let i = 0; i < 20; i += 1) {
+          playing = await win.evaluate(() => window.__qingyinTest.state().playing);
+          if (playing) break;
+          await sleep(250);
+        }
+        facts.playingBeforeFill = playing;
+        if (!playing) problems.push('双击曲目后没有进入播放状态（前置失败）');
+
         // 触发：托盘菜单项 = shell 句柄的同一个函数
         const trigger = await app.evaluate(() => globalThis.__qingyinDesktopShell.triggerFillLyrics());
         console.log(`触发: ${JSON.stringify({ ok: trigger.ok, reason: trigger.reason, musicPath: trigger.musicPath })}`);
@@ -217,9 +234,16 @@ async function main() {
           problems.push('页面上没看到重扫通知文案（胶水的 rescanLyrics 没跑？）');
         }
 
-        // 面板级验证：选中那首 → 打开歌词面板 → 能看到假工具写的句子
+        // 音乐还在放：工具 + 自动重扫全程零打扰（第一不变式）
+        const stillPlaying = await win.evaluate(() => window.__qingyinTest.state().playing);
+        facts.musicStillPlayingAfterFill = stillPlaying;
+        console.log(`补歌词全程后仍在播放: ${stillPlaying ? '是' : '否'}`);
+        if (playing && !stillPlaying) {
+          problems.push('补歌词/自动重扫把正在放的音乐打断了');
+        }
+
+        // 面板级验证：当前曲目就是唯一曲目 → 打开歌词面板 → 能看到假工具写的句子
         if (lyricsClaimed) {
-          await win.locator('.row').first().dblclick({ timeout: 15000 });
           await win.keyboard.press('y');
           await sleep(500);
           const panelText = await win.evaluate(() => document.body.innerText);
