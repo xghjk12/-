@@ -58,6 +58,32 @@ const PING_PATH = '/__qingyin__/ping';
 const IPC_ECHO_BYTES = 'desktop:echo-bytes';
 const IPC_INFO = 'desktop:info';
 
+/**
+ * 壳层 → 渲染进程的播放命令通道（托盘「播放/暂停」「上一首」「下一首」）。
+ *
+ * 单向：主进程 `webContents.send`，preload 订阅后转成回调。窗口隐藏但没销毁时
+ * 这条路照样通——这正是"关窗到托盘继续放歌"能配上托盘控制的前提。
+ */
+const IPC_SHELL_COMMAND = 'shell:command';
+
+/** 渲染进程 → 壳层的播放状态上报通道（菜单文案要靠它，不能猜）。 */
+const IPC_SHELL_STATUS = 'shell:status';
+
+/**
+ * 合法的命令类型。主进程只认这三个：托盘菜单是唯一的发送方，
+ * 但既然要跨进程传字符串，就把白名单钉在这里，渲染进程收到别的类型直接忽略。
+ */
+const SHELL_COMMAND_TYPES = Object.freeze(['play-pause', 'prev', 'next']);
+
+/**
+ * 窗口几何。放这里而不是 window.js，是因为 shellSettings.js / windowState.js
+ * 要保持"纯 Node、不 require electron"（单测直接跑，见 README 坑 10）。
+ */
+const WINDOW_MIN_WIDTH = 900;
+const WINDOW_MIN_HEIGHT = 600;
+const WINDOW_DEFAULT_WIDTH = 1440;
+const WINDOW_DEFAULT_HEIGHT = 1000;
+
 module.exports = {
   APP_ID,
   APP_NAME,
@@ -71,4 +97,11 @@ module.exports = {
   PING_PATH,
   IPC_ECHO_BYTES,
   IPC_INFO,
+  IPC_SHELL_COMMAND,
+  IPC_SHELL_STATUS,
+  SHELL_COMMAND_TYPES,
+  WINDOW_MIN_WIDTH,
+  WINDOW_MIN_HEIGHT,
+  WINDOW_DEFAULT_WIDTH,
+  WINDOW_DEFAULT_HEIGHT,
 };

@@ -1,5 +1,7 @@
 'use strict';
 
+const { playPauseLabel } = require('./playbackStatus.js');
+
 /**
  * 托盘菜单模板（纯数据，不 require electron）。
  *
@@ -9,6 +11,8 @@
  *
  * 菜单结构（Windows 通知区右键）：
  *   显示/隐藏窗口（随可见状态换文案）
+ *   ---
+ *   播放/暂停（随播放状态换文案）/ 上一首 / 下一首    t6
  *   ---
  *   补歌词…（随工具状态换文案：进行中/上次结果）     t5
  *   指定音乐文件夹…（补歌词工具要的路径）            t5
@@ -25,17 +29,41 @@
  *   openAtLogin: boolean,
  *   version: string,
  *   updateAvailable: string | null,
+ *   playback?: { playing: boolean, hasTrack: boolean } | null,
  *   lyricsToolStatus?: string,
  *   lyricsToolExitCode?: number | null,
  * }} state
  * @returns {Array<object>} electron Menu 模板（不含 click，id 由 tray.js 消费）
  */
-function buildTrayMenuTemplate({ windowVisible, openAtLogin, version, updateAvailable, lyricsToolStatus, lyricsToolExitCode }) {
+function buildTrayMenuTemplate({ windowVisible, openAtLogin, version, updateAvailable, playback, lyricsToolStatus, lyricsToolExitCode }) {
   const items = [];
 
   items.push({
     id: 'toggle-window',
     label: windowVisible ? '隐藏窗口' : '显示窗口',
+  });
+
+  items.push({ type: 'separator' });
+
+  // 播放控制（t6）。窗口隐藏时这三项照样有效——渲染进程没销毁，命令走
+  // webContents.send，这正是"关窗到托盘继续放歌"的配套能力。
+  // 没有"当前曲目"时一律禁用：点下去没反应比灰着更让人困惑。
+  // 状态来自渲染进程上报（playbackStatus.js 规范化），主进程不猜。
+  const canControl = Boolean(playback?.hasTrack);
+  items.push({
+    id: 'play-pause',
+    label: playPauseLabel(playback),
+    enabled: canControl,
+  });
+  items.push({
+    id: 'prev',
+    label: '上一首',
+    enabled: canControl,
+  });
+  items.push({
+    id: 'next',
+    label: '下一首',
+    enabled: canControl,
   });
 
   items.push({ type: 'separator' });

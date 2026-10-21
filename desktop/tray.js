@@ -16,9 +16,11 @@ const { trayTooltip } = require('./shellText.js');
  * @param {() => boolean} options.isVisible 主窗口当前是否可见（菜单文案换向用）
  * @param {() => boolean} options.getOpenAtLogin 自启开关当前值（checkbox 勾选用）
  * @param {() => string | null} options.getUpdateAvailable 挂起的新版本号（本期恒 null）
+ * @param {() => { playing: boolean, hasTrack: boolean } | null} options.getPlayback 当前播放状态（t6：菜单文案与禁用态）
  * @param {() => { status: string, exitCode: number | null }} options.getLyricsToolState 补歌词工具状态（t5 菜单文案）
  * @param {() => void} options.onToggleWindow 左键/菜单：切换窗口显隐
  * @param {() => void} options.onShowWindow 双击兜底：确保窗口可见（双击会先触发两次 click）
+ * @param {(type: 'play-pause' | 'prev' | 'next') => void} options.onPlaybackCommand 菜单：播放控制（t6）
  * @param {(checked: boolean) => void} options.onSetOpenAtLogin 菜单：自启开关
  * @param {() => void} options.onQuit 菜单：退出
  * @param {() => void} options.onFillLyrics 菜单：补歌词（t5）
@@ -37,7 +39,7 @@ function createAppTray(options) {
 
   let lastTemplate = [];
 
-  /** 状态变化后重建菜单与 tooltip（显隐/自启/更新提示/工具状态任一变化都要调）。 */
+  /** 状态变化后重建菜单与 tooltip（显隐/自启/更新提示/工具状态/播放状态任一变化都要调）。 */
   function refresh() {
     const lyricsState = options.getLyricsToolState ? options.getLyricsToolState() : { status: 'idle' };
     const state = {
@@ -45,12 +47,18 @@ function createAppTray(options) {
       openAtLogin: Boolean(options.getOpenAtLogin()),
       updateAvailable: options.getUpdateAvailable() ?? null,
       version: options.version,
+      // 播放状态来自渲染进程上报（main.js 里由 playbackStatus.js 规范化后存着）
+      playback: options.getPlayback ? options.getPlayback() : null,
       lyricsToolStatus: lyricsState?.status,
       lyricsToolExitCode: lyricsState?.exitCode ?? null,
     };
     const template = buildTrayMenuTemplate(state);
     const click = {
       'toggle-window': () => options.onToggleWindow(),
+      // 播放三项（t6）：三个菜单项共用一个发送函数，type 就是命令名
+      'play-pause': () => options.onPlaybackCommand?.('play-pause'),
+      prev: () => options.onPlaybackCommand?.('prev'),
+      next: () => options.onPlaybackCommand?.('next'),
       'fill-lyrics': () => options.onFillLyrics?.(),
       'lyrics-music-folder': () => options.onChooseMusicFolder?.(),
       'lyrics-tool-settings': () => options.onChooseToolScript?.(),
