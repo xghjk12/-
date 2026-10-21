@@ -1113,6 +1113,27 @@ button {
   font-size: 12px;
 }
 
+/* 桌面端补歌词工具的状态行（运行中 / 完成 / 失败），只在桥存在时渲染 */
+.lyrics-tool-status {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.7;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.lyrics-tool-status[data-tool-status='failed'] {
+  color: var(--danger, #c0392b);
+}
+
+.lyrics-tool-status .btn {
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
 .lyrics-paste {
   padding: 10px 12px;
   border-top: 1px solid var(--line);

@@ -17,6 +17,7 @@ import { useEffect, useRef, useState } from 'react';
 import { currentLineIndex, lyricSearchKeyword, buildLyricSearchUrl } from '../core/lyrics.js';
 import { effectiveOffsetSec, readLyricFile, useLyrics } from './lyrics.js';
 import { readLiveProgress, useAppStore } from './store.js';
+import { hasDesktopLyricsBridge, useDesktopLyrics } from './desktopLyrics.js';
 import { CloseIcon, MusicIcon, SearchIcon, WarnIcon } from './Icons.js';
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -51,6 +52,11 @@ export function LyricsPanel() {
   const [pasteText, setPasteText] = useState('');
   const [templateOpen, setTemplateOpen] = useState(false);
   const [draft, setDraft] = useState(template);
+
+  // 桌面端的补歌词工具入口：**桥不存在时连 DOM 都不渲染**（纯 web/PWA
+  // 不能出现一个点了没反应的按钮——是"不存在"，不是"禁用"）
+  const desktopLyricsAvailable = hasDesktopLyricsBridge();
+  const desktopLyrics = useDesktopLyrics();
 
   const listRef = useRef<HTMLDivElement>(null);
   const lastUserScroll = useRef(0);
@@ -243,7 +249,33 @@ export function LyricsPanel() {
               <button className="btn" onClick={openSearch} title={template ? undefined : '先设置一个歌词站地址'}>
                 <SearchIcon size={13} /> 去搜歌词
               </button>
+              {desktopLyricsAvailable && (
+                <button
+                  className="btn"
+                  onClick={desktopLyrics.start}
+                  disabled={desktopLyrics.status?.status === 'running'}
+                  title="用外部工具批量补歌词（托盘菜单也有入口）；完成后自动重新扫描认领"
+                >
+                  <MusicIcon size={13} /> 用补歌词工具
+                </button>
+              )}
             </div>
+            {desktopLyricsAvailable && desktopLyrics.status && desktopLyrics.status.status !== 'idle' && (
+              <p className="lyrics-tool-status" data-tool-status={desktopLyrics.status.status}>
+                {desktopLyrics.status.status === 'running'
+                  ? '补歌词工具运行中'
+                  : desktopLyrics.status.status === 'done'
+                    ? '补歌词完成，已重新扫描'
+                    : `补歌词失败${desktopLyrics.status.error ? `：${desktopLyrics.status.error}` : ''}`}
+                {desktopLyrics.status.tail.length > 0 &&
+                  `（${desktopLyrics.status.tail[desktopLyrics.status.tail.length - 1]}）`}
+                {desktopLyrics.status.status === 'running' && (
+                  <button className="btn btn-quiet" onClick={desktopLyrics.cancel}>
+                    取消
+                  </button>
+                )}
+              </p>
+            )}
             <p className="lyrics-note">
               也可以直接把 .lrc 文件拖到这块区域。
               {!template && ' 「去搜歌词」需要你先在下面填一个自己常用的歌词站地址（应用不内置任何站点）。'}
