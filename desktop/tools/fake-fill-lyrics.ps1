@@ -1,7 +1,9 @@
 ﻿param(
   # 音乐文件夹的绝对路径（往这里写一个 .lrc）
   [Parameter(Mandatory = $true)]
-  [string]$MusicPath
+  [string]$MusicPath,
+  # 测试用：先睡这么久再写文件（验证「运行中」守卫与取消路径用）
+  [int]$DelaySec = 0
 )
 
 # t5 测试用的**假**补歌词工具：在曲库里挑一首还没有同名 .lrc 的音频，
@@ -40,6 +42,11 @@ foreach ($file in $files) {
 
 if ($null -eq $target) {
   Fail 4 "曲库里找不到「还没有同名 .lrc」的音频文件：$MusicPath"
+}
+
+if ($DelaySec -gt 0) {
+  Write-Output "FAKE-FILL sleeping $DelaySec s"
+  Start-Sleep -Seconds $DelaySec
 }
 
 $lrcPath = [System.IO.Path]::ChangeExtension($target.FullName, '.lrc')

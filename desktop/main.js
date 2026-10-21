@@ -56,6 +56,8 @@ let staticServer = null;
 let tray = null;
 let settings = loadSettings(userDataDir);
 let isQuitting = false;
+// t5：补歌词工具控制器（boot 里由 installLyricsIpc 装配，托盘/IPC/退出共用）
+let lyrics = null;
 
 function fail(title, detail) {
   // showErrorBox 不依赖窗口，ready 前后都能用
@@ -162,12 +164,32 @@ function createTray() {
     getUpdateAvailable: () => updateAvailable,
     isVisible: () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
     getOpenAtLogin: () => settings.openAtLogin,
+    getLyricsToolState: () => (lyrics ? lyrics.status() : { status: 'idle' }),
     onToggleWindow: () => toggleMainWindow(),
     onShowWindow: () => showMainWindow(),
     onSetOpenAtLogin: (checked) => {
       // 菜单点击是同步回调：异步写盘，失败只记日志（托盘 UI 状态由 refresh 反映真实值）
       void setOpenAtLogin(checked).catch((error) => {
         console.error('[desktop] 设置开机自启失败：', error);
+      });
+    },
+    onFillLyrics: () => {
+      void lyrics?.startFill().then((result) => {
+        if (!result.ok) {
+          console.log(`[desktop] 补歌词未启动：${result.reason}`);
+        } else {
+          console.log(`[desktop] 补歌词已启动：${result.scriptPath} → ${result.musicPath}`);
+        }
+      });
+    },
+    onChooseMusicFolder: () => {
+      void lyrics?.chooseMusicFolder().then((result) => {
+        if (result?.changed) console.log(`[desktop] 补歌词音乐文件夹 = ${result.musicFolderPath}`);
+      });
+    },
+    onChooseToolScript: () => {
+      void lyrics?.chooseToolScript().then((result) => {
+        if (result?.changed) console.log(`[desktop] 补歌词工具 = ${result.lyricsToolPath || '(内置脚本)'}`);
       });
     },
     onQuit: () => quitApp(),
@@ -302,6 +324,55 @@ async function boot() {
     startedAt: new Date().toISOString(),
   });
 
+  // t5：补歌词 IPC（lyrics:run/status/cancel）。目录选择对话框也从这里接，
+  // 挂在 createWindow 之后 createTray 之前——托盘菜单的「补歌词…」从第一秒就能点。
+  lyrics = installLyricsIpc({
+    builtInScriptPath: path.join(repoRoot, 'desktop', 'tools', 'fill-lyrics.ps1'),
+    getSettings: () => settings,
+    saveSettingsPatch: (patch) => {
+      settings = saveSettings(userDataDir, patch);
+      return settings;
+    },
+    broadcast: (channel, payload) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send(channel, payload);
+      }
+    },
+    onStateChanged: () => tray?.refresh(),
+    pickMusicFolder: async (title) => {
+      const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+        title,
+        properties: ['openDirectory', 'promptToCreate'],
+      });
+      return result.canceled ? null : (result.filePaths[0] ?? null);
+    },
+    pickToolScript: async () => {
+      const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+        title: '选择补歌词工具脚本（默认用内置的 desktop/tools/fill-lyrics.ps1）',
+        filters: [
+          { name: '脚本或可执行文件', extensions: ['ps1', 'bat', 'cmd', 'exe'] },
+        ],
+        properties: ['openFile'],
+      });
+      if (!result.canceled && result.filePaths[0]) {
+        return { path: result.filePaths[0], reset: false };
+      }
+      // 取消时不动现有值；只有在已有自定义脚本时才问一句要不要恢复内置
+      if (settings.lyricsToolPath) {
+        const choice = await dialog.showMessageBox(mainWindow ?? undefined, {
+          type: 'question',
+          buttons: ['恢复内置脚本', '保持现状'],
+          defaultId: 1,
+          cancelId: 1,
+          message: '要恢复用内置的补歌词脚本吗？',
+          detail: `当前自定义脚本：${settings.lyricsToolPath}\n内置脚本走 artifacts\\lyricflow 的 LyricFlow（见仓库 README）。`,
+        });
+        return { path: null, reset: choice.response === 0 };
+      }
+      return { path: null, reset: false };
+    },
+  });
+
   console.log(`[desktop] origin = ${staticServer.origin}`);
   console.log(`[desktop] userData = ${app.getPath('userData')}`);
   console.log(`[desktop] 版本 = ${appVersion}（tooltip：${trayTooltip({ appName: constants.APP_NAME, version: appVersion, updateAvailable }).replace('\n', ' | ')}）`);
@@ -360,6 +431,9 @@ if (!app.requestSingleInstanceLock()) {
   app.on('will-quit', () => {
     tray?.destroy();
     void staticServer?.close();
+    // t5：退出时把正在跑的补歌词工具整棵进程树杀掉——不杀的话
+    // python 会变孤儿继续下载，用户视角是"退了应用还在偷偷跑"
+    lyrics?.status().status === 'running' && lyrics.cancel();
   });
 
   // 给自动化验证用的主进程侧句柄（desktop/checkTray.js；t3 也会用）。
@@ -389,5 +463,13 @@ if (!app.requestSingleInstanceLock()) {
     setOpenAtLogin: (open) => setOpenAtLogin(open),
     // 只读 OS 侧自启状态（不写）：验证脚本读回用
     readOsOpenAtLogin: () => readOsLoginItem(),
+    // ---- t5：补歌词（托盘菜单项同一批函数，E2E 用 app.evaluate 驱动）----
+    // 托盘「补歌词…」菜单项的真实处理函数（解析目录 → spawn 工具）
+    triggerFillLyrics: () => lyrics?.startFill(),
+    // 主进程侧工具状态（runner 真源；渲染进程走 lyrics:status IPC 也能拿到同一份）
+    lyricsState: () => lyrics?.status() ?? { status: 'idle' },
+    // 托盘「选择补歌词工具…」/「指定音乐文件夹…」的真实处理函数（弹原生对话框并存档）
+    chooseLyricsToolScript: () => lyrics?.chooseToolScript(),
+    chooseLyricsMusicFolder: () => lyrics?.chooseMusicFolder(),
   };
 }

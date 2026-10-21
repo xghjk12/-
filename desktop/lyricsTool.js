@@ -69,7 +69,9 @@ function createLyricsToolRunner(options) {
   function finish(status, exitCode, error) {
     clearTimer();
     child = null;
-    apply({ status, exitCode, finishedAt: Date.now(), error: error ?? null });
+    // 取消/超时先定性过 error（已取消/超时文案）：close 事件再进来时
+    // 不能把它抹掉——用户看到"已取消"比看到"exitCode 1"有用得多
+    apply({ status, exitCode, finishedAt: Date.now(), error: error ?? state.error ?? null });
   }
 
   /**

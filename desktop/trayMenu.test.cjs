@@ -19,11 +19,39 @@ function byId(template, id) {
   return template.find((item) => item.id === id);
 }
 
-test('模板结构：切换窗口 / 自启 / 更新位 / 退出，之间用分隔条隔开', () => {
+test('模板结构：既有分组齐全，退出在最后（不断言精确全列表——t6 的播放项等他人项共存）', () => {
   const template = templateOf();
   const ids = template.filter((item) => item.id).map((item) => item.id);
-  assert.deepEqual(ids, ['toggle-window', 'open-at-login', 'check-update', 'quit']);
-  assert.equal(template.filter((item) => item.type === 'separator').length, 3);
+  // t2/t5 之外允许别的任务往模板里加项（t6 的播放控制已经加进来了），
+  // 这里只固化我们自己的不变式：必备 id 都在、有分隔条、quit 收尾
+  for (const required of ['toggle-window', 'fill-lyrics', 'lyrics-music-folder', 'lyrics-tool-settings', 'open-at-login', 'check-update', 'quit']) {
+    assert.ok(ids.includes(required), `缺少菜单项 ${required}`);
+  }
+  assert.equal(ids[ids.length - 1], 'quit', 'quit 必须是最后一项');
+  assert.ok(template.filter((item) => item.type === 'separator').length >= 3, '分组分隔条不能少于 3 个');
+  assert.deepEqual(ids, [...new Set(ids)], '菜单项 id 不能重复');
+});
+
+test('补歌词项：默认可点，running 时换文案且禁用', () => {
+  const idle = byId(templateOf(), 'fill-lyrics');
+  assert.equal(idle.label, '补歌词…');
+  assert.notEqual(idle.enabled, false);
+
+  const running = byId(templateOf({ lyricsToolStatus: 'running' }), 'fill-lyrics');
+  assert.match(running.label, /运行中/);
+  assert.equal(running.enabled, false);
+
+  assert.match(byId(templateOf({ lyricsToolStatus: 'done' }), 'fill-lyrics').label, /上次成功/);
+  assert.match(byId(templateOf({ lyricsToolStatus: 'failed' }), 'fill-lyrics').label, /上次失败/);
+});
+
+test('补歌词的路径设置入口：两个菜单项都在且可点', () => {
+  const folder = byId(templateOf(), 'lyrics-music-folder');
+  assert.equal(folder.label, '指定音乐文件夹…');
+  assert.notEqual(folder.enabled, false);
+  const tool = byId(templateOf(), 'lyrics-tool-settings');
+  assert.equal(tool.label, '选择补歌词工具…');
+  assert.notEqual(tool.enabled, false);
 });
 
 test('toggle-window 文案随窗口可见状态换向', () => {
