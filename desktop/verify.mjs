@@ -1205,17 +1205,17 @@ async function main() {
     });
 
     // ---------- 8a) 补歌词 · 工具路径不存在 ----------
-    // 实现语义（desktop/lyricsIpc.js 的 currentScriptPath）：自定义路径不存在时
-    // 回退内置 fill-lyrics.ps1。内置工具第一道校验是"MusicPath 必须是个目录"，
-    // 所以这里故意把 musicFolderPath 指向一个**文件**：失败发生在启动 python 之前，
-    // 既验证了"不存在路径不会静默", 也绝不触发真实的联网补歌词。
-    await session('8a) 补歌词 · 工具路径不存在 → 必须报错（不许静默）', async () => {
+    // t9 语义（desktop/lyricsIpc.js 的 resolveLyricsToolScript）：自定义路径
+    // 不存在 → **快速失败**，绝不静默回退到内置 fill-lyrics.ps1（回退 = 假成功，
+    // 用户以为自己那个工具跑了；内置若再失败，报错还张冠李戴）。
+    // 证据：failed + 错误文案含路径；startedAt 保持 null、日志尾为空 =
+    // 没有任何进程被启动过（没有回退去跑内置）。
+    await session('8a) 补歌词 · 工具路径不存在 → 快速失败（绝不静默回退内置）', async () => {
       const missingTool = path.join(artifactsDir, 'this-lyrics-tool-does-not-exist.ps1');
-      const notADirectory = path.join(repoRoot, 'tests', 'fixtures', 'plain.mp3');
       writeSettingsFile(LYRICS_USER_DATA_DIR, {
         openAtLogin: false,
         lyricsToolPath: missingTool,
-        musicFolderPath: notADirectory,
+        musicFolderPath: LYRICS_MUSIC_DIR,
       });
       const { app: failApp, win: failWin, errors: failErrors } = await launchWithRetry(
         LYRICS_USER_DATA_DIR,
@@ -1229,31 +1229,30 @@ async function main() {
         const trigger = await failApp.evaluate(() => globalThis.__qingyinDesktopShell.triggerFillLyrics());
         const final = await waitForLyricsState(failApp, 'failed', 30000);
         facts.lyricsMissingTool = {
-          trigger: { ok: trigger.ok, scriptPath: trigger.scriptPath, status: trigger.status?.status },
+          trigger: { ok: trigger.ok, reason: trigger.reason, scriptPath: trigger.scriptPath, status: trigger.status?.status },
           final: {
             status: final?.status,
             exitCode: final?.exitCode,
+            startedAt: final?.startedAt,
             scriptLabel: final?.scriptLabel,
             error: final?.error,
             tail: final?.tail?.slice(-3) ?? [],
           },
         };
-        check(trigger.ok === true, '不存在路径：补歌词仍然启动（不是静默什么都不发生）', {
-          status: trigger.status?.status,
+        check(trigger.ok === false && trigger.reason === 'tool-script-missing', '触发即拒绝：ok:false + tool-script-missing', {
+          ok: trigger.ok,
+          reason: trigger.reason,
         });
+        check(final?.status === 'failed', '终态 failed（预检失败也走状态机，UI 看得到）', { status: final?.status });
         check(
-          typeof trigger.scriptPath === 'string' &&
-            trigger.scriptPath.endsWith('fill-lyrics.ps1') &&
-            trigger.scriptPath !== missingTool,
-          '自定义路径不存在 → 回退内置 fill-lyrics.ps1（实现语义，见 README）',
-          { requested: path.basename(missingTool), used: path.basename(trigger.scriptPath ?? '') },
+          typeof final?.error === 'string' && final.error.includes(missingTool),
+          '错误文案包含失效路径本身 + 怎么改',
+          { error: final?.error ?? null },
         );
-        check(final?.status === 'failed', '终态 failed', { status: final?.status });
-        const readable = `${final?.error ?? ''}\n${(final?.tail ?? []).join('\n')}`;
         check(
-          /MUSIC_PATH|不是有效目录|无法|不存在|Cannot|not recognized/i.test(readable),
-          '失败原因可读（日志尾不是空的）',
-          { tail: final?.tail?.slice(-2) ?? [], error: final?.error ?? null },
+          final?.startedAt === null && (final?.tail ?? []).length === 0,
+          '没有任何进程被启动（startedAt=null 且日志尾为空 = 没有回退去跑内置）',
+          { startedAt: final?.startedAt ?? null, tail: final?.tail ?? [] },
         );
         check(failErrors.length === 0, '失败路径会话零渲染进程报错', { errors: failErrors.slice(0, 3) });
       } finally {

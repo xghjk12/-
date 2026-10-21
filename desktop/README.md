@@ -860,13 +860,13 @@ t5 新增/修改（补歌词，详见 §9）：
 | `desktop/tools/fill-lyrics.ps1`（新） | 内置工具脚本：artifacts\lyricflow 的 venv python `-m src.main` + 根 README 实测过的那套环境变量；venv 缺失 → exit 2 + 安装指引；MusicPath 无效 → exit 3；退出码透传，UTF-8 输出 |
 | `desktop/tools/fake-fill-lyrics.ps1`（新） | 假工具（测试用）：给曲库里一首没有 .lrc 的音频写一个内容确定的 .lrc；exit 0/3/4；`-DelaySec` 供取消测试 |
 | `desktop/lyricsTool.js`（新） | 执行器：spawn powershell **无 shell**（纯 argv，无注入面）、尾部 40 行日志、`taskkill /T /F` 取整棵树、15 分钟超时、idle→running→done/failed/**cancelled** 状态机（cancelled 为独立终态 + 运行代号 token 防迟到事件污染，单测真实跑 powershell） |
-| `desktop/lyricsIpc.js`（新） | `lyrics:run/status/cancel` IPC + 路径解析（settings.musicFolderPath，没有就弹一次主进程目录对话框并存档）+ 工具脚本选择（settings.lyricsToolPath 空 = 内置） |
+| `desktop/lyricsIpc.js`（新） | `lyrics:run/status/cancel` IPC + 路径解析（settings.musicFolderPath，没有就弹一次主进程目录对话框并存档）+ 工具脚本选择：**t9 语义**——`resolveLyricsToolScript` 纯函数（空 = 内置、存在 = 自定义、**非空但不存在 = 快速失败**带路径错误，绝不静默回退）+ `musicFolderProblem`（存档是文件不是目录 → 带路径快速失败）；预检失败经 `runner.failFast` 落状态机（failed + 可读错误，不 spawn 任何进程） |
 | `desktop/preload.js`（改） | `window.qingyinDesktop.lyrics`：run/status/cancel/onStatus/getTrackPath |
 | `desktop/trayMenu.js`（改） | 菜单加「补歌词…（状态化文案）/指定音乐文件夹…/选择补歌词工具…」 |
 | `desktop/main.js`（改） | boot 装 lyricsIpc、托盘三项回调、shell 句柄加 `triggerFillLyrics/lyricsState/chooseLyrics*`、will-quit 杀运行中的工具进程树 |
 | `desktop/checkPathForFile.js`（新） | §9.1 的前置验证脚本（报告 `artifacts/desktop/path-for-file.json`） |
 | `desktop/checkLyricsTool.js`（新） | §9.4 的 E2E（报告 `artifacts/desktop/lyrics-tool.json`） |
-| `desktop/lyricsTool.test.cjs` / `shellSettings.test.cjs`（改） | runner 单测（真实 powershell）+ settings 三键/部分更新断言 |
+| `desktop/lyricsTool.test.cjs` / `shellSettings.test.cjs`（改） | runner 单测（真实 powershell，含 failFast 预检失败不启进程）+ settings 三键/部分更新断言；另有 `lyricsIpc.test.cjs`（新，t9）：resolver 三分支（空→内置、存在→自定义、不存在→错误**不返回内置**）+ 音乐文件夹预检 |
 | `src/ui/desktopLyrics.ts`（新） | 渲染进程胶水：订阅状态推送，done → 自动 `rescanLyrics()` + 通知；幂等 init，桥不存在零副作用（单测 8 项） |
 | `src/ui/LyricsPanel.tsx`（改） | 空状态加「用补歌词工具」按钮 + 状态行（桥不存在时**不渲染**，非禁用） |
 | `src/main.tsx`（改） | +2 行：import + `initDesktopLyrics()` |
@@ -1029,9 +1029,10 @@ preload 仍保留 `getTrackPath`（行为可查 + 将来若换曲库来源可直
 ```text
 托盘「补歌词…」/ 面板按钮
   → 主进程 lyricsIpc.startFill()
-      目录：settings.musicFolderPath，没有 → showOpenDialog 选一次并存档
-      脚本：settings.lyricsToolPath 非空用它（测试指向假工具），空 → 内置
-            desktop/tools/fill-lyrics.ps1（venv python -m src.main）
+      目录：settings.musicFolderPath，没有/失效 → showOpenDialog 选一次并存档
+      脚本：settings.lyricsToolPath 空 → 内置 desktop/tools/fill-lyrics.ps1
+            （venv python -m src.main）；非空且存在 → 用它（测试指向假工具）；
+            非空但不存在 → **快速失败**（t9：绝不静默回退内置）
   → lyricsTool.js spawn powershell（无 shell、argv 数组、UTF-8、日志尾 40 行）
   → 工具退出：0 → done；非 0 → failed（退出码透传，可读错误进日志尾）；
       用户取消 → cancelled（**独立终态**，t8：取消是主动行为不是故障，
@@ -1048,9 +1049,17 @@ python 变孤儿）；默认 15 分钟超时；`will-quit` 时杀运行中的工
 状态机推到终态再杀树，IPC 返回的快照 / status 查询 / 状态推送是同一份；杀树
 后子进程**迟到的 close 事件不许改状态**（每轮 spawn 带运行代号 token，旧轮
 事件直接丢弃——这同时防住「取消后立刻再跑一轮，旧 close 把新一轮改成
-failed」的竞态，单测里有这一幕）。失败错误必须可读：venv 缺失 → exit 2 +
-安装指引全文（LyricFlow 不进 git，新克隆机器上缺失是**正常路径**，指引比
-报错有用）；MusicPath 无效 → exit 3。
+failed」的竞态，单测里有这一幕）。
+**静默回退（t9 修正）**：自定义工具路径失效时旧行为是悄悄换内置脚本跑——
+假成功（用户以为自己那个工具跑了）+ 报错张冠李戴（「MUSIC_PATH 无效」跟
+真正原因无关）。现在 `resolveLyricsToolScript` 三分支：空 = 内置（正常路径，
+行为不变）、存在 = 自定义、**非空但不存在 = 快速失败**（failed + 错误文案含
+路径与改法「托盘 → 选择补歌词工具… 可重选，或选恢复内置脚本」，不 spawn
+任何进程——`runner.failFast` 落状态机，startedAt 保持 null、日志尾为空就是
+没跑过进程的证据）；同类地 `musicFolderProblem` 拦「存档路径是个文件」并给
+带路径文案（路径不存在仍走目录对话框重选——那是恢复，不是静默回退）。
+失败错误必须可读：venv 缺失 → exit 2 + 安装指引全文（LyricFlow 不进 git，
+新克隆机器上缺失是**正常路径**，指引比报错有用）；MusicPath 无效 → exit 3。
 
 ### 9.3 顺手修掉的预存 bug：`rescanLyrics` 快照失效（web 版同受益）
 
@@ -1075,11 +1084,11 @@ prompt/denied 一律走快照老路径，绝不弹框）就用现有私有 `coll
 # 前置验证（§9.1 的证据）
 node desktop/checkPathForFile.js      # 报告 artifacts/desktop/path-for-file.json
 
-# 端到端（三幕，全绿才算过）
+# 端到端（四幕，全绿才算过）
 node desktop/checkLyricsTool.js       # 报告 artifacts/desktop/lyrics-tool.json
 ```
 
-`checkLyricsTool.js` 三幕（曲库与 userData 都在 `artifacts/desktop/` 下隔离，
+`checkLyricsTool.js` 四幕（曲库与 userData 都在 `artifacts/desktop/` 下隔离，
 真实曲库只被复制读取，**不往 新建文件夹 写任何测试产物**）：
 
 1. **成功链路**：真实目录选择（驱动原生对话框）→ 托盘触发（shell 句柄
@@ -1087,6 +1096,10 @@ node desktop/checkLyricsTool.js       # 报告 artifacts/desktop/lyrics-tool.jso
    渲染进程自动认领（`readLyrics` 非空）→ 重扫通知出现 → 双击曲目打开面板
    → **面板里显示假工具写的那句**；
 2. **失败传播**：换成 exit 3 的工具 → failed + 退出码透传 + 可读错误进日志尾；
+2.5. **工具路径失效（t9）**：存档指向不存在的脚本 → 触发即
+   `{ok:false, reason:'tool-script-missing'}` → failed + 错误文案含那个路径 →
+   面板状态行看得到 → startedAt=null 且日志尾空（**没有任何进程被启动**，
+   没有静默回退去跑内置）；
 3. **取消**：30 秒慢工具（先拉一个带 marker 的 venv python 子进程）→ running
    → 渲染进程 `window.qingyinDesktop.lyrics.cancel()` → **独立终态 cancelled**
    （内外状态一致：IPC 快照与轮询结果都是 cancelled、finishedAt 有值、

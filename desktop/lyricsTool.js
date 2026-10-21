@@ -209,7 +209,32 @@ function createLyricsToolRunner(options) {
     return { cancelled: true, status: snapshot() };
   }
 
-  return { run, cancel, status: snapshot };
+  /**
+   * 预检失败（t9）：IPC 层在 spawn **之前**发现配置坏了（工具路径不存在、
+   * 音乐文件夹不是目录）。不启动任何进程，直接落 failed 终态——
+   * 证据语义：startedAt 保持 null、tail 为空 = **从来没有跑过进程**。
+   *
+   * 运行中不许外部改状态（那是 close/cancel 的地盘）；其余状态可以覆盖
+   * （上一轮的结果本来就该被新一轮的预检失败顶掉）。
+   *
+   * @param {string} error 用户可读的失败原因（含具体路径与怎么改）
+   * @param {string} [scriptLabel] 状态快照里的工具标识
+   * @returns {boolean} 是否成功落态
+   */
+  function failFast(error, scriptLabel) {
+    if (state.status === 'running') return false;
+    apply({
+      status: 'failed',
+      finishedAt: Date.now(),
+      exitCode: null,
+      error,
+      ...(scriptLabel ? { scriptLabel } : {}),
+      tail: [],
+    });
+    return true;
+  }
+
+  return { run, cancel, failFast, status: snapshot };
 }
 
 module.exports = { createLyricsToolRunner, TAIL_LIMIT, DEFAULT_MAX_DURATION_MS };

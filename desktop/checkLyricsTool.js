@@ -328,6 +328,70 @@ async function main() {
     }
   }
 
+  // ============ 第二幕半：工具路径不存在（t9：绝不静默回退到内置） ============
+  {
+    // 存档里配了一个不存在的自定义工具 + 有效的音乐文件夹 → 触发后必须
+    // 快速失败：failed + 错误文案含路径，且**没有任何进程被启动**
+    // （startedAt 保持 null、日志尾为空 = 证明没有回退去跑内置脚本）
+    const missingTool = path.join(artifactsDir, 'this-tool-does-not-exist.ps1');
+    fs.rmSync(missingTool, { force: true });
+    writeSettings(missingTool);
+    const app = await launchApp();
+    try {
+      const win = await app.firstWindow({ timeout: 60000 });
+      await win.waitForLoadState('domcontentloaded');
+      await win.goto(`${ORIGIN}/?selftest=1`, { waitUntil: 'domcontentloaded' });
+      await win.waitForSelector('.row, .empty', { timeout: 60000 });
+
+      const trigger = await app.evaluate(() => globalThis.__qingyinDesktopShell.triggerFillLyrics());
+      const final = await waitForLyricsState(app, 'failed', 15000);
+      console.log(
+        `路径失效: ${JSON.stringify({ ok: trigger.ok, reason: trigger.reason, status: final?.status, error: final?.error })}`,
+      );
+      facts.missingTool = {
+        triggerOk: trigger.ok,
+        reason: trigger.reason,
+        status: final?.status,
+        error: final?.error,
+        startedAt: final?.startedAt,
+        tail: final?.tail,
+      };
+      if (trigger.ok !== false || trigger.reason !== 'tool-script-missing') {
+        problems.push(`工具路径失效应快速失败（ok:false, reason:tool-script-missing）：${JSON.stringify(trigger)}`);
+      }
+      if (final?.status !== 'failed') {
+        problems.push(`工具路径失效的终态应是 failed：${JSON.stringify(final)}`);
+      }
+      if (!final?.error || !final.error.includes(missingTool)) {
+        problems.push(`错误文案必须含那个不存在的路径：${JSON.stringify(final?.error)}`);
+      }
+      if (final?.startedAt !== null || (final?.tail ?? []).length !== 0) {
+        problems.push(
+          `预检失败不许启动任何进程（startedAt 应为 null、日志尾应空）：${JSON.stringify({ startedAt: final?.startedAt, tail: final?.tail })}`,
+        );
+      }
+      // UI 可见性（不写进控制台就算数）：渲染进程胶水对 failed 终态推的
+      // 通知条里要能看到带路径的错误。selftest 夹具库会让行列表持续重渲染
+      // （双击不稳定），所以用通知条做 DOM 断言——它与面板状态行渲染自
+      // 同一份状态推送。
+      await sleep(800);
+      const bodyText = await win.evaluate(() => document.body.innerText);
+      const visibleInUi = bodyText.includes(missingTool);
+      facts.missingToolNoticeVisible = visibleInUi;
+      if (!visibleInUi) {
+        problems.push(`页面上（通知条/状态行）应显示带路径的错误：${JSON.stringify(bodyText.slice(0, 300))}`);
+      }
+    } catch (error) {
+      problems.push(`路径失效链路异常：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   // ============ 第三幕：取消（渲染进程 IPC 通道） ============
   {
     writeSettings(slowTool);

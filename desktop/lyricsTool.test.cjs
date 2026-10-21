@@ -223,6 +223,38 @@ test('上一轮结果能再启动（done 之后可以再跑）', async () => {
   assert.equal(final.exitCode, 4);
 });
 
+test('failFast（t9）：预检失败不启动任何进程，直接落 failed + 可读错误', async () => {
+  const events = [];
+  const runner = createLyricsToolRunner({
+    defaultScriptPath: FAKE_TOOL,
+    onStateChange: (state) => events.push(state.status),
+  });
+  const musicDir = tmpMusicDir();
+  const message = '补歌词工具路径不存在：D:\\不存在\\my-tool.ps1（托盘 → 选择补歌词工具… 可重选，或选「恢复内置脚本」）';
+
+  // running 中不许外部改状态（那是 close/cancel 的地盘）
+  runner.run({ scriptPath: FAKE_TOOL, musicPath: musicDir });
+  assert.equal(runner.failFast(message, 'my-tool.ps1'), false, '运行中拒改');
+  const done = await waitForStatus(runner, 'done');
+  assert.equal(done.status, 'done', '前置：第一轮正常跑完（有 startedAt/tail 痕迹）');
+
+  // done 之后预检失败：上一轮的痕迹必须被顶掉，这轮**没有任何进程被启动**
+  assert.equal(runner.failFast(message, 'my-tool.ps1'), true);
+  const state = runner.status();
+  assert.equal(state.status, 'failed');
+  assert.equal(state.error, message, '错误文案原样落进状态（面板/通知看得到，不只控制台）');
+  assert.equal(state.exitCode, null);
+  assert.deepEqual(state.tail, [], '日志尾清空：没跑过任何进程');
+  assert.equal(state.scriptLabel, 'my-tool.ps1');
+  assert.notEqual(state.finishedAt, null);
+  assert.ok(events.includes('failed'), '状态推送发生过（广播给渲染进程/托盘）');
+
+  // failFast 后修好配置可以正常再跑新一轮
+  const next = runner.run({ scriptPath: FAKE_TOOL, musicPath: musicDir });
+  assert.equal(next.started, true);
+  await waitForStatus(runner, 'done');
+});
+
 test('日志尾只保留 TAIL_LIMIT 行（防长跑工具吃内存）', () => {
   assert.equal(typeof TAIL_LIMIT, 'number');
   assert.ok(TAIL_LIMIT > 0 && TAIL_LIMIT <= 100, `TAIL_LIMIT 应在 1..100，当前 ${TAIL_LIMIT}`);
