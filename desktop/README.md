@@ -24,6 +24,7 @@ t2 实现阶段（本版）补齐桌面壳五件套：**托盘 / 关窗到托盘
 | fs 桥 | 设计见 §4，**未实现**（§3.5 实测后降级为可选优化，本期不做） |
 | t2 五件套 | **全部做完并自动化验证通过**（§3.6）：托盘、关窗到托盘、单实例、开机自启、版本号 |
 | 开机自启的实现方式 | **自管 HKCU Run 注册表项**（`desktop/autoStart.js`），Electron 官方 `setLoginItemSettings` 在 44.9.1 静默失效——完整调查与验证桥接见 §8 |
+| t5 补歌词 | **做完并自动化验证通过**（§9）：托盘/面板一键调外部工具（LyricFlow）→ 工具退出 0 → 渲染进程自动重扫认领 .lrc；顺带修了 `rescanLyrics` 快照失效这个预存 bug（web 版同受益） |
 | 本机坑 | 坑 1-5 见 §5；t2 新增坑 6-10（PowerShell 自动变量、CDP 关窗陷阱、DSH 沙箱降权 Electron 子进程、僵尸进程、编辑器剥 BOM） |
 
 ---
@@ -710,9 +711,28 @@ t3 新增（验收）：
 | `desktop/verify.mjs`（新） | t3 验收脚本：窗口+列表 / 双击真播放 / 歌词面板 / **隐藏后继续播**（含 OS 层 EnumWindows 证据与暂停反证）/ 附加托盘退出；报告落 `artifacts/desktop/verify.json` |
 | `desktop/verify.md`（新） | 自动化的判定细节 + 四项人工清单（托盘图标与菜单、重启后自启、隐藏时系统媒体键、托盘退出），每项写明"怎么看/预期/不符合记什么" |
 
-**没动过**：`src/core`、`src/ui`、`src/platform`、`scripts/`、`vite.config.ts`、
-`package.json` 里已有的脚本（t2 在 scripts 里**新增**了 `"test:desktop"` 一条，
-devDependencies 里的 `electron` 是 pnpm 自己写的）。
+t5 新增/修改（补歌词，详见 §9）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `desktop/tools/fill-lyrics.ps1`（新） | 内置工具脚本：artifacts\lyricflow 的 venv python `-m src.main` + 根 README 实测过的那套环境变量；venv 缺失 → exit 2 + 安装指引；MusicPath 无效 → exit 3；退出码透传，UTF-8 输出 |
+| `desktop/tools/fake-fill-lyrics.ps1`（新） | 假工具（测试用）：给曲库里一首没有 .lrc 的音频写一个内容确定的 .lrc；exit 0/3/4；`-DelaySec` 供取消测试 |
+| `desktop/lyricsTool.js`（新） | 执行器：spawn powershell **无 shell**（纯 argv，无注入面）、尾部 40 行日志、`taskkill /T /F` 取整棵树、15 分钟超时、idle→running→done/failed 状态机（单测真实跑 powershell） |
+| `desktop/lyricsIpc.js`（新） | `lyrics:run/status/cancel` IPC + 路径解析（settings.musicFolderPath，没有就弹一次主进程目录对话框并存档）+ 工具脚本选择（settings.lyricsToolPath 空 = 内置） |
+| `desktop/preload.js`（改） | `window.qingyinDesktop.lyrics`：run/status/cancel/onStatus/getTrackPath |
+| `desktop/trayMenu.js`（改） | 菜单加「补歌词…（状态化文案）/指定音乐文件夹…/选择补歌词工具…」 |
+| `desktop/main.js`（改） | boot 装 lyricsIpc、托盘三项回调、shell 句柄加 `triggerFillLyrics/lyricsState/chooseLyrics*`、will-quit 杀运行中的工具进程树 |
+| `desktop/checkPathForFile.js`（新） | §9.1 的前置验证脚本（报告 `artifacts/desktop/path-for-file.json`） |
+| `desktop/checkLyricsTool.js`（新） | §9.4 的 E2E（报告 `artifacts/desktop/lyrics-tool.json`） |
+| `desktop/lyricsTool.test.cjs` / `shellSettings.test.cjs`（改） | runner 单测（真实 powershell）+ settings 三键/部分更新断言 |
+| `src/ui/desktopLyrics.ts`（新） | 渲染进程胶水：订阅状态推送，done → 自动 `rescanLyrics()` + 通知；幂等 init，桥不存在零副作用（单测 8 项） |
+| `src/ui/LyricsPanel.tsx`（改） | 空状态加「用补歌词工具」按钮 + 状态行（桥不存在时**不渲染**，非禁用） |
+| `src/main.tsx`（改） | +2 行：import + `initDesktopLyrics()` |
+| `src/ui/store.ts`（改） | `rescanLyrics` 修复（§9.3）：重扫前重新遍历目录，扫描后写入的 .lrc 真能认领 |
+
+**没动过**：`src/core`、`src/platform`（`src/ui/store.ts` 的 `rescanLyrics` 与 LyricsPanel/
+desktopLyrics 除外，见上表与 §9.3——那是 t5 的最小必要接缝）、`scripts/`、
+`vite.config.ts`、`package.json` 里已有的脚本（t2 只**新增**了 `"test:desktop"`）。
 
 ---
 
@@ -799,3 +819,116 @@ devDependencies 里的 `electron` 是 pnpm 自己写的）。
 
 调查期间用的临时探针（`artifacts/desktop/tmp-login-*.cjs`、`tmp-auto-*.cjs`、
 `tmp-probe*.cjs`、`tmp-binary-strings.cjs` 等）验证完已删除；结论都在本节与坑 8 里。
+
+---
+
+## 9. t5 补歌词：外部工具一键调用 + 自动认领（2026-10-22）
+
+目标：**播放器不自己抓歌词**（产品原则），一键调外部工具（LyricFlow）批量补，
+工具写出的 `.lrc` 由播放器的既有认领机制接住。入口两个：托盘菜单「补歌词…」、
+歌词面板空状态的「用补歌词工具」按钮（后者只在桌面端渲染——桥不存在时
+DOM 都不出现，不是禁用）。
+
+### 9.1 前置验证：`webUtils.getPathForFile` 对句柄来源的 File 返回空串
+
+任务书要求先验证再定方案。`desktop/checkPathForFile.js`：真实点击「选择音乐
+文件夹」→ 驱动原生对话框选 `artifacts/desktop/path-probe-music` → 从 IndexedDB
+取回目录句柄 → 第一个文件的 File（3.9MB，名字/大小都对，是**真**磁盘文件）→
+`window.qingyinDesktop.lyrics.getTrackPath(file)`：
+
+```text
+diskPath: ""     ← 句柄来源的 File 反查不出路径
+fakePath: ""     ← 内存构造的 File 同样空串（这条是文档行为）
+```
+
+结论：**Electron 44.9.1 的 webUtils 只认拖拽/file-input 背书的 File**，File
+System Access 句柄的 File 拿不到绝对路径。方案退到任务书里的备选：
+`settings.musicFolderPath` + 主进程原生目录对话框（第一次触发补歌词时弹**一次**，
+选完存档，之后不再问）；托盘另有「指定音乐文件夹…」显式入口。
+preload 仍保留 `getTrackPath`（行为可查 + 将来若换曲库来源可直接启用）。
+报告：`artifacts/desktop/path-for-file.json`。
+
+### 9.2 链路（全部真实路径，无捷径）
+
+```text
+托盘「补歌词…」/ 面板按钮
+  → 主进程 lyricsIpc.startFill()
+      目录：settings.musicFolderPath，没有 → showOpenDialog 选一次并存档
+      脚本：settings.lyricsToolPath 非空用它（测试指向假工具），空 → 内置
+            desktop/tools/fill-lyrics.ps1（venv python -m src.main）
+  → lyricsTool.js spawn powershell（无 shell、argv 数组、UTF-8、日志尾 40 行）
+  → 工具退出：0 → done；非 0 → failed（退出码透传，可读错误进日志尾）
+  → 状态推送 lyrics:status-changed（隐藏窗口也收得到，音乐不停）
+  → 渲染进程 src/ui/desktopLyrics.ts：done → store.rescanLyrics()
+      （重新遍历目录 → 认领新 .lrc →「歌词：认领 N 首」通知）
+```
+
+安全/健壮性要点：spawn **不带 shell**（曲库路径是单个 argv 元素，无注入面）；
+取消走 `taskkill /PID <pid> /T /F`（powershell 是包装进程，只 kill 它会让
+python 变孤儿）；默认 15 分钟超时；`will-quit` 时杀运行中的工具树。
+失败的错误必须可读：venv 缺失 → exit 2 + 安装指引全文（LyricFlow 不进 git，
+新克隆机器上缺失是**正常路径**，指引比报错有用）；MusicPath 无效 → exit 3。
+
+### 9.3 顺手修掉的预存 bug：`rescanLyrics` 快照失效（web 版同受益）
+
+E2E 第一轮就照出来了：假工具写盘成功、退出码 0、通知出现，**认领数 = 0**。
+原因是 `rescanLyrics` 用的 `currentSource` 是扫描时的快照（`sourceFromFiles`
+把 File 装进 Map，`listLyricFiles` 只遍历 Map）——扫描**之后**写进目录的
+`.lrc` 永远不在快照里。根 README「跑完 LyricFlow → 点重新扫描歌词 →
+全部认领」这条流程对扫描后新增的文件实际是失效的（bug 在 web 版就存在，
+t5 的自动化验收把它逼了出来）。
+
+修法（只动 `rescanLyrics` 内部，签名/其他 action 未动）：进 `syncLyrics` 前，
+持久化句柄存在且 `hasReadPermission`（**queryPermission 只查不请求**，
+prompt/denied 一律走快照老路径，绝不弹框）就用现有私有 `collect(handle)`
+重新遍历并换掉 `currentSource`；重读失败 try/catch 兜住（保留快照 + 可读通知）；
+**零播放打扰**——不碰 controller/引擎/当前曲目。刻意不用现成的
+`restoreLibrary()`：它的 `restorePlayback()` 会把正在放的歌重载成**暂停态并
+跳回上次落盘位置**，工具跑完那一刻往往正在放歌，那比 bug 更糟。
+
+### 9.4 验证（全部可自动化复现）
+
+```powershell
+# 前置验证（§9.1 的证据）
+node desktop/checkPathForFile.js      # 报告 artifacts/desktop/path-for-file.json
+
+# 端到端（三幕，全绿才算过）
+node desktop/checkLyricsTool.js       # 报告 artifacts/desktop/lyrics-tool.json
+```
+
+`checkLyricsTool.js` 三幕（曲库与 userData 都在 `artifacts/desktop/` 下隔离，
+真实曲库只被复制读取，**不往 新建文件夹 写任何测试产物**）：
+
+1. **成功链路**：真实目录选择（驱动原生对话框）→ 托盘触发（shell 句柄
+   `triggerFillLyrics`，与菜单项同一函数）→ running → done(0) → .lrc 落盘 →
+   渲染进程自动认领（`readLyrics` 非空）→ 重扫通知出现 → 双击曲目打开面板
+   → **面板里显示假工具写的那句**；
+2. **失败传播**：换成 exit 3 的工具 → failed + 退出码透传 + 可读错误进日志尾；
+3. **取消**：30 秒慢工具 → running → 渲染进程 `window.qingyinDesktop.lyrics.cancel()`
+   → failed +「已取消」。
+
+本环境的重要事实：**坑 8 的"子进程降权"没有拦住 D:\ 上的文件写**（reg 写
+HKCU/用户目录 temp 被拒，但 electron→powershell→写 `artifacts/` 完全正常）——
+所以补歌词链路在 harness 里全真验证，不需要 node 桥。
+
+单测：`desktop/lyricsTool.test.cjs`（真实 powershell 跑假工具：成功/失败/
+守卫/取消/done 后可再跑）、`src/ui/desktopLyrics.test.ts`（8 项：桥缺失零调用、
+done 恰好扫一次、running 不扫、failed 不扫、幂等）、shellSettings 三键。
+`pnpm verify` 全套 + `pnpm check:ui` 全绿（web 冒烟无回归，按钮在 web 里
+根本不渲染）。
+
+### 9.5 真 LyricFlow 的人工验证清单（不自动化：走网络、慢、内容不可控）
+
+1. 准备：`artifacts\lyricflow\.venv\Scripts\python.exe` 存在（本机已装；
+   新机器按根 README「给整个曲库补歌词」装好）；
+2. 启动桌面端，选一个有几首缺歌词曲目的音乐文件夹；
+3. 托盘右键 →「补歌词…」：预期不弹任何目录选择（已选过曲库时
+   musicFolderPath 首次会让你指定一次），托盘菜单项变「（运行中）」并禁用，
+   歌词面板空状态出现状态行；LyricFlow 的日志滚动进日志尾；
+4. 等它跑完：预期状态变 done，面板状态行变「补歌词完成，已重新扫描」，
+   弹「歌词：认领 N 首」通知，缺歌词的曲目面板里能显示歌词（对照第 30 秒
+   的当前句高亮）；
+5. 网络失败/接口 403：预期 failed + 状态行给出日志尾最后一条可读错误；
+6. 跑一半点「取消」：预期立即 failed「已取消」，曲库目录里没有半截 .lrc；
+7. 删掉 `artifacts\lyricflow`（或改名）再点补歌词：预期 failed 且日志尾
+   里有完整的安装指引（exit 2 路径）。
