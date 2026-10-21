@@ -20,4 +20,7 @@ if (container) {
 // 桌面端补歌词桥（t5）：桥不存在（纯 web/PWA）时在注册任何监听之前就 return
 initDesktopLyrics();
 
+// 托盘播放控制接缝（t6）：桥不存在时在订阅任何东西之前就 return（web 零影响）
+startDesktopShell();
+
 void startSelfCheck();

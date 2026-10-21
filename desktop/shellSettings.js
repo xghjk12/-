@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { sanitizeWindowState } = require('./windowState.js');
 
 /**
  * 壳层设置持久化：userData/settings.json。
@@ -20,6 +21,11 @@ const path = require('node:path');
  *    FileSystemDirectoryHandle，Electron 44 实测拿不到绝对路径
  *    （desktop/checkPathForFile.js 的结论，README §9），所以外部工具要的
  *    路径只能让用户选一次存下来。
+ *  - windowState      窗口位置/尺寸/是否最大化（t6）。**刻意不进 IndexedDB**：
+ *    窗口几何是"壳"的状态，与曲库数据无关，而且必须在渲染进程起来之前
+ *    就能同步读到（开窗那一刻就要用）。结构校验交给 windowState.js 的
+ *    sanitizeWindowState——不合法就整个丢成 null（下次用默认几何），
+ *    半合法的几何会造出一个更怪的窗口。
  *
  * 纯 Node 模块（不 require electron），单测直接跑：desktop/shellSettings.test.cjs。
  */
@@ -29,6 +35,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   openAtLogin: false,
   lyricsToolPath: '',
   musicFolderPath: '',
+  windowState: null,
 });
 
 function settingsPath(dir) {
@@ -51,7 +58,7 @@ function normalizeToolPath(value) {
 
 /**
  * @param {string} dir userData 目录
- * @returns {{ openAtLogin: boolean, lyricsToolPath: string, musicFolderPath: string }}
+ * @returns {{ openAtLogin: boolean, lyricsToolPath: string, musicFolderPath: string, windowState: object | null }}
  */
 function loadSettings(dir) {
   try {
@@ -62,6 +69,8 @@ function loadSettings(dir) {
         openAtLogin: parsed.openAtLogin === true,
         lyricsToolPath: normalizeToolPath(parsed.lyricsToolPath),
         musicFolderPath: normalizeFolderPath(parsed.musicFolderPath),
+        // 旧存档没有这个键（t6 之前写的文件）→ null = 首次启动，用默认几何
+        windowState: sanitizeWindowState(parsed.windowState),
       };
     }
   } catch {
@@ -72,17 +81,20 @@ function loadSettings(dir) {
 
 /**
  * @param {string} dir userData 目录
- * @param {{ openAtLogin?: boolean, lyricsToolPath?: string, musicFolderPath?: string }} settings
- * @returns {{ openAtLogin: boolean, lyricsToolPath: string, musicFolderPath: string }} 实际写入的（规范化后）设置
+ * @param {{ openAtLogin?: boolean, lyricsToolPath?: string, musicFolderPath?: string, windowState?: object | null }} settings
+ * @returns {{ openAtLogin: boolean, lyricsToolPath: string, musicFolderPath: string, windowState: object | null }} 实际写入的（规范化后）设置
  */
 function saveSettings(dir, settings) {
   const current = loadSettings(dir);
   const has = (key) => Boolean(settings && Object.prototype.hasOwnProperty.call(settings, key));
   const next = {
-    // 三个键都支持"只传变更项"（部分更新），没传的保持现值
+    // 四个键都支持"只传变更项"（部分更新），没传的保持现值。
+    // t6 的窗口防抖写盘就靠这条：它只传 { windowState }，不会把自启开关
+    // 和补歌词的两个路径一起冲掉。
     openAtLogin: has('openAtLogin') ? settings.openAtLogin === true : current.openAtLogin,
     lyricsToolPath: has('lyricsToolPath') ? normalizeToolPath(settings.lyricsToolPath) : current.lyricsToolPath,
     musicFolderPath: has('musicFolderPath') ? normalizeFolderPath(settings.musicFolderPath) : current.musicFolderPath,
+    windowState: has('windowState') ? sanitizeWindowState(settings.windowState) : current.windowState,
   };
   const file = settingsPath(dir);
   const tmp = `${file}.tmp-${process.pid}`;

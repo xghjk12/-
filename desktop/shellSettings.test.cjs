@@ -21,7 +21,8 @@ function tmpDir() {
 }
 
 function full(overrides = {}) {
-  return { openAtLogin: false, lyricsToolPath: '', musicFolderPath: '', ...overrides };
+  // windowState 默认 null（t6）：首次启动没有窗口几何，用默认尺寸居中
+  return { openAtLogin: false, lyricsToolPath: '', musicFolderPath: '', windowState: null, ...overrides };
 }
 
 test('目录里没有 settings.json（首次启动）→ 全部默认值', () => {
@@ -98,11 +99,11 @@ test('坏路径读回来是空串而不是抛异常或带病存活', () => {
   assert.deepEqual(loadSettings(dir), full());
 });
 
-test('未知键不落盘（schema 显式三键，多余的丢弃）', () => {
+test('未知键不落盘（schema 显式四键，多余的丢弃）', () => {
   const dir = tmpDir();
   saveSettings(dir, { openAtLogin: true, somethingElse: 'x' });
   const raw = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
-  assert.deepEqual(raw, { openAtLogin: true, lyricsToolPath: '', musicFolderPath: '' });
+  assert.deepEqual(raw, { openAtLogin: true, lyricsToolPath: '', musicFolderPath: '', windowState: null });
 });
 
 test('settings.json 损坏 → 默认值，不抛异常', () => {
@@ -140,4 +141,77 @@ test('默认值对象是冻结的（防止测试/调用方改默认坑下一个�
   assert.throws(() => {
     DEFAULT_SETTINGS.openAtLogin = true;
   });
+});
+
+// ---------------------------------------------------------------- t6：windowState
+
+test('旧存档（t6 之前写的，没有 windowState 键）→ 读成 null，不抛', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(
+    path.join(dir, 'settings.json'),
+    JSON.stringify({ openAtLogin: true, lyricsToolPath: '', musicFolderPath: 'D:\\音乐' }),
+    'utf8',
+  );
+  assert.deepEqual(loadSettings(dir), full({ openAtLogin: true, musicFolderPath: 'D:\\音乐' }));
+  assert.equal(loadSettings(dir).windowState, null);
+});
+
+test('windowState 往返：存进去什么样，读回来什么样', () => {
+  const dir = tmpDir();
+  const state = { x: 120, y: 80, width: 1280, height: 860, maximized: false };
+  saveSettings(dir, { windowState: state });
+  assert.deepEqual(loadSettings(dir), full({ windowState: state }));
+
+  saveSettings(dir, { windowState: { ...state, maximized: true } });
+  assert.equal(loadSettings(dir).windowState.maximized, true);
+});
+
+test('windowState 结构不合法 → 整个丢成 null（不留半合法的几何）', () => {
+  const dir = tmpDir();
+  for (const junk of [{ x: 0, y: 0 }, { x: 0, y: 0, width: 10, height: 800 }, 'nope', 42, [], { x: 0, y: 0, width: '1200', height: 800 }]) {
+    saveSettings(dir, { windowState: junk });
+    assert.equal(loadSettings(dir).windowState, null, `${JSON.stringify(junk)} 应该被判为不合法`);
+  }
+});
+
+test('windowState 落盘时坐标取整、maximized 只认 true', () => {
+  const dir = tmpDir();
+  saveSettings(dir, { windowState: { x: 100.6, y: 79.2, width: 1200.4, height: 800, maximized: 'yes' } });
+  assert.deepEqual(loadSettings(dir).windowState, { x: 101, y: 79, width: 1200, height: 800, maximized: false });
+});
+
+test('部分更新：只传 windowState 不动其他键，只传别的键也不清掉 windowState', () => {
+  const dir = tmpDir();
+  saveSettings(dir, { openAtLogin: true, musicFolderPath: 'D:\\音乐', lyricsToolPath: 'D:\\t.ps1' });
+  const state = { x: 10, y: 20, width: 1000, height: 700, maximized: false };
+
+  // t6 的防抖写盘只传这一个键：三个既有键必须原样保留
+  saveSettings(dir, { windowState: state });
+  assert.deepEqual(loadSettings(dir), full({
+    openAtLogin: true,
+    musicFolderPath: 'D:\\音乐',
+    lyricsToolPath: 'D:\\t.ps1',
+    windowState: state,
+  }));
+
+  // 反过来：切自启开关不能把窗口几何冲掉
+  saveSettings(dir, { openAtLogin: false });
+  assert.deepEqual(loadSettings(dir).windowState, state);
+});
+
+test('显式传 windowState: null 可以清掉（"忘掉上次的位置"）', () => {
+  const dir = tmpDir();
+  saveSettings(dir, { windowState: { x: 10, y: 20, width: 1000, height: 700, maximized: true } });
+  saveSettings(dir, { windowState: null });
+  assert.equal(loadSettings(dir).windowState, null);
+});
+
+test('windowState 不会被存档里的多余字段带脏（只认五个键）', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(
+    path.join(dir, 'settings.json'),
+    JSON.stringify({ windowState: { x: 5, y: 6, width: 1000, height: 700, maximized: false, evil: 'rm -rf' } }),
+    'utf8',
+  );
+  assert.deepEqual(loadSettings(dir).windowState, { x: 5, y: 6, width: 1000, height: 700, maximized: false });
 });

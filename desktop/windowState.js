@@ -109,10 +109,18 @@ function isOnDisplays(bounds, displays, minVisiblePx = MIN_VISIBLE_PX) {
   });
 }
 
-/** 在给定屏幕工作区里居中一个窗口（窗口比屏幕大就缩到屏幕大小）。 */
+/**
+ * 在给定屏幕工作区里居中一个窗口。
+ *
+ * 窗口比屏幕大就缩到屏幕大小：宁可小一点，也不要造出一个挂在屏幕外、
+ * 用户抓不到标题栏的窗口（居中算出负偏移正是这种窗口）。
+ * 这里**不再**强行抬到 WINDOW_MIN_*：存档来的尺寸在 sanitizeWindowState
+ * 里已经保证不小于最小值，默认尺寸（1440x1000）也比最小值大，
+ * 再抬一次只会在"屏幕比最小窗口还小"的极端情况下把窗口推出屏幕。
+ */
 function centeredIn(area, width, height) {
-  const fitWidth = Math.max(WINDOW_MIN_WIDTH, Math.min(width, area.width));
-  const fitHeight = Math.max(WINDOW_MIN_HEIGHT, Math.min(height, area.height));
+  const fitWidth = Math.max(1, Math.min(width, area.width));
+  const fitHeight = Math.max(1, Math.min(height, area.height));
   return {
     x: Math.round(area.x + (area.width - fitWidth) / 2),
     y: Math.round(area.y + (area.height - fitHeight) / 2),
