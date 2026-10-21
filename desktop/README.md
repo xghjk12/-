@@ -215,9 +215,7 @@ userData/IndexedDB：app_qingyin_0.indexeddb.leveldb(15233B)
 
 - `navigator.storage.persist()` → `true`；`storage.estimate()` → `usage 628978 / quota 203954178290`（≈190 GB）。
 - `typeof window.showDirectoryPicker` → **`"function"`**：Electron 44 里 File System Access API 是存在的。
-  **但没有验证点它能不能真的弹出目录选择框**（需要用户手势，无头探针里点不动）。
-  如果它能用，浏览器那条路（`browserMusicSource` + handle 持久化）在桌面端可能直接可行，
-  fs 桥就退化成"更好的体验"而不是"唯一的出路"。实现阶段值得先花十分钟试一下。
+  **能不能真弹窗已经实测：能，见下面 §3.5**——结论是桌面端不需要 fs 桥也能用。
 - `contextBridge` 传二进制**没问题**：主进程返回的 `Uint8Array` 到渲染进程仍是
   `Uint8Array`（`isUint8Array:true`、`byteLength:4096`、内容 `(i*7+3)&0xff` 校验通过）。
   这条直接决定 fs 桥可以用 IPC 传字节，不需要 base64。
@@ -227,6 +225,52 @@ userData/IndexedDB：app_qingyin_0.indexeddb.leveldb(15233B)
   **`dist/index.html` 没有 CSP** —— 实现阶段可以从我们的静态服务下发一条 `Content-Security-Policy` 响应头
   （比 meta 标签强，而且我们正好控制着服务端），顺手把这条警告消掉。
 - 环境：Windows 10 家庭中文版 19045 x64；Electron 44.9.1 / Chrome 152.0.7977.167 / Node 24.22.0 / V8 15.2.124.43-electron.0。
+
+### 3.5 showDirectoryPicker 实测（实现阶段开工前的插播实验，2026-10-22）
+
+**结论：可用。** 真实点击应用自己的「选择音乐文件夹」按钮后，Windows 原生目录选择框
+（`#32770`，标题「选择允许此网站查看的文件夹」）真的弹出来；选中
+`D:\轻音播放\新建文件夹` 后 `showDirectoryPicker()` 返回真实句柄，曲库完整扫进来：
+**曲目 22 首、`.lrc` 16 个、已认领歌词 16 首**（与该目录的实际内容一致）。
+用户取消时抛 `AbortError`（原文：
+`Failed to execute 'showDirectoryPicker' on 'Window': The user aborted a request.`），
+`store.ts` 的 `pickDirectory` 会捕获并转成 info 级通知——取消不算错误，路径健壮。
+
+**架构含义：fs 桥（§4）从"唯一出路"降级为"可选优化"**（原生 Range/206 播放、
+跳过每次重启后的重新授权提示这类体验升级）。本期明确不做桥。
+
+复现命令（全自动化，不需要真人点对话框）：
+
+```
+node desktop/checkDirectoryPicker.js
+```
+
+它做的事：Playwright 真实点击按钮（CDP 输入带用户激活，不是 evaluate 凭空调用）→
+`desktop/driveFolderDialog.ps1` 用 UI Automation + Win32 消息驱动原生对话框 →
+断言探针、扫描统计、曲目数、歌词认领数，截图与 JSON 报告落
+`artifacts/desktop/directory-picker.*`。
+
+驱动这个原生对话框踩出来的坑（换机器写自动化会再遇到，全部记下来）：
+
+1. **UI Automation 的 RootElement.Children 枚举看不到这个对话框**——它是 owned
+   window。必须用 user32 `EnumWindows` 找（`snapshotDesktop.ps1` 里就是这个方法）。
+2. **对话框属于一个 electron 工具进程**——既不是拥有主窗口的浏览器进程，也不是
+   Playwright 报的 pid（那是它自己起的包装进程）。按 pid / 命令行过滤全都匹配不上；
+   实践中按「窗口类 #32770 + 进程名 electron」匹配即可。
+3. **这个经典 Win32 通用对话框的 UIA ControlType 全部谎报成 Pane**（编辑框、按钮
+   都是），按 `ControlType.Edit` / `ControlType.Button` 找不到；`ValuePattern` /
+   `InvokePattern` 也拿不到。可靠的做法是纯 Win32：`EnumChildWindows` 按
+   ClassName + 控件 ID 找 HWND（路径框 `Edit`/1152、确认键 `Button`/1=IDOK、
+   取消键 `Button`/2），然后 `WM_SETTEXT` 填路径、`BM_CLICK` 点确认。
+4. `WM_SETTEXT` **不会触发 EN_CHANGE**——对话框靠这个通知启用 OK 按钮，所以要补发
+   一条 `WM_COMMAND(EN_CHANGE)`；不补的话按钮可能是灰的（本次实测补发后
+   `OK-ENABLED True`）。
+5. 两个容易误判的读数：路径框 `GetWindowText` 读回是**空串**（但 IDOK 仍按内容
+   处理，读回为空不代表失败）；`Alt+D` 键盘导航会把路径敲到别处（还会弹出别的子
+   对话框），不要用。
+6. 运行注意：这个实验会把目标目录真的扫进 IndexedDB（曲库状态会变），驱动对话框
+   时会短暂抢占鼠标与前台焦点（对话框需要真实置前）。
+
 
 ---
 
@@ -362,8 +406,9 @@ export function desktopMusicSource(bridge: Window['qingyinDesktop'], root: strin
 
 ### 4.7 实现阶段的落地顺序建议
 
-1. 先试 `showDirectoryPicker()` 在壳里能不能真弹窗（§3）——能用就先不做桥，成本最低。
-2. 不能弹窗再做：主进程 4 个通道 → preload 暴露 → `desktopMusicSource` → `/media/*` 路由 → `openSource` 走 `url`。
+1. ~~先试 `showDirectoryPicker()` 在壳里能不能真弹窗（§3）——能用就先不做桥，成本最低。~~
+   **已试完（§3.5）：能用，曲库完整扫进来。fs 桥本期不做。**
+2. ~~不能弹窗再做~~：主进程 4 个通道 → preload 暴露 → `desktopMusicSource` → `/media/*` 路由 → `openSource` 走 `url`（留给以后做播放体验升级时参考）。
 3. 每步都配单元测试：桥用假 `window.qingyinDesktop` 注入，断言"只读了文件头"这条老规矩没被破坏
    （`byteSource.ts` 的注释里写明了这类测试怎么写）。
 
@@ -495,6 +540,9 @@ pwsh 7 默认按 UTF-8 读，所以同一个文件在 7 下没问题——这种
 | `desktop/probe.js` | origin 持久性实验的探针入口（两阶段、截图、userData 目录清点、报告 JSON） |
 | `desktop/runProbe.js` | 探针驱动：spawn 两个独立进程、解析报告、打印中文读数、做前后对比 |
 | `desktop/checkWindow.js` | 用 playwright-core 的 `_electron.launch()` 驱动**真入口**，断言列表渲染出来了 |
+| `desktop/checkDirectoryPicker.js` | §3.5 的实验：真实点击「选择音乐文件夹」，驱动原生目录对话框，断言曲库扫进来（22 首 / 16 歌词） |
+| `desktop/driveFolderDialog.ps1` | 用 EnumWindows + Win32 消息驱动原生「选择文件夹」对话框（§3.5 的坑 1-5 全在里面） |
+| `desktop/snapshotDesktop.ps1` | 桌面快照：全屏截图 + EnumWindows 全量可见顶层窗口转储（排原生对话框问题的第一步） |
 | `desktop/installElectron.js` | 补下 Electron 二进制（§5 坑 4） |
 | `desktop/start.ps1` | 一键启动，自动处理坑 1 与坑 2 |
 | `desktop/smoke.js` / `desktop/smoke2.js` | 崩溃二分器（§5 坑 3 的证据来源）。换机器排障时还有用，所以留着 |
@@ -513,7 +561,8 @@ pwsh 7 默认按 UTF-8 读，所以同一个文件在 7 下没问题——这种
 3. **Service Worker 会接管页面**（方案 a 实测 `controlled:true`）。桌面端升级后可能拿到旧外壳，
    实现阶段要么让 `/sw.js` 返回 404，要么启动时清 SW 存储。
 4. **没有 CSP**（Electron 每次启动都警告）。我们的静态服务正好能下发响应头，建议实现阶段补上。
-5. **`showDirectoryPicker` 在壳里存在但未验证能否弹窗**（§3）。这条结果会直接改变 fs 桥的优先级。
+5. ~~**`showDirectoryPicker` 在壳里存在但未验证能否弹窗**（§3）~~。
+   **已实测（§3.5）：能弹、能选、能扫描，桌面端不需要 fs 桥也能用。**
 6. **托盘 / 关窗到托盘 / 单实例 / 开机自启 / 版本号界面全部未做**。
    单实例锁已经有了（`main.js`），托盘与 `app.setLoginItemSettings` 是新增工作；
    版本号直接用 `app.getVersion()`——但前提是**用目录方式启动**（见 `entry.js` 的注释），否则显示成 `44.9.1`。
