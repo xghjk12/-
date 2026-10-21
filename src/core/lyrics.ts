@@ -260,10 +260,11 @@ export function isLyricFileName(fileName: string): boolean {
 export type LyricDecoder = (bytes: Uint8Array, label: string, fatal: boolean) => string | undefined;
 
 function defaultDecoder(bytes: Uint8Array, label: string, fatal: boolean): string | undefined {
-  const TextDecoderCtor = (globalThis as { TextDecoder?: typeof TextDecoder }).TextDecoder;
-  if (!TextDecoderCtor) return undefined;
+  // 用 `typeof` 守卫，而不是 `globalThis.TextDecoder`：core 里连"间接取全局"也不该出现，
+  // 这样 `no-platform-api.test.ts` 才能把 globalThis / self 一并列为违规。
+  if (typeof TextDecoder === 'undefined') return undefined;
   try {
-    return new TextDecoderCtor(label, { fatal }).decode(bytes);
+    return new TextDecoder(label, { fatal }).decode(bytes);
   } catch {
     return undefined;
   }
