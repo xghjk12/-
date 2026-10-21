@@ -1,0 +1,8 @@
+{
+  "name": "qingyin-player-desktop",
+  "productName": "轻音播放",
+  "version": "0.1.0",
+  "private": true,
+  "description": "轻音播放的桌面端外壳（Electron）。这个 package.json 有两个作用：让 `electron desktop` 能直接跑起来，以及把 desktop/ 声明成 CommonJS（仓库根的 package.json 是 type: module）。",
+  "main": "entry.js"
+}
