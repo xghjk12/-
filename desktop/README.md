@@ -63,9 +63,9 @@ node desktop/checkTray.js
 # 单元测试（纯函数 + 真注册表读写往返，43 个）：
 npm run test:desktop          # 即 node --test "desktop/*.test.cjs"
 
-# (7) t3 验收：窗口+列表 / 真实播放 / 歌词面板 / 隐藏窗口后继续播（四条硬指标）
+# (7) 总验收：t3 四条硬指标 + t7 三组（补歌词成功/失败/取消、托盘播放控制、窗口状态记忆）
 node desktop/verify.mjs
-# 人工清单（托盘/重启自启/系统媒体键/托盘退出）见 desktop/verify.md
+# 判定细节与人工清单（t3 四项 + t6 两项 + t7 三项）见 desktop/verify.md
 ```
 
 `desktop/start.ps1` 支持的开关：`-Rebuild`（先构建再启动）、
@@ -335,11 +335,20 @@ JSON 在 `artifacts/desktop/tray-check.json`，截图在 `artifacts/desktop/tray
       取消勾选后该项消失；
 - [ ] 托盘菜单「退出」：托盘图标消失、进程退出。
 
-### 3.7 t3 验收：Playwright 驱动桌面端 + 人工清单（2026-10-22）
+### 3.7 t3 验收：Playwright 驱动桌面端 + 人工清单（2026-10-22；t7 已扩展）
 
-脚本 `node desktop/verify.mjs`（每次用独立 profile `artifacts/desktop/userdata-verify`，
+> **t7 扩展（2026-10-22）**：同一个 `verify.mjs` 现在共 **123 条断言**（沿用 t3 37 条 +
+> 本期新增 86 条），多进程覆盖三组新能力，耗时约 45 秒：
+> 补歌词（假工具 running→done→自动认领/UI 通知；不存在路径与工具 exit 5 两条失败路径；
+> 慢工具取消 + 进程树 0 残留）、托盘播放控制（隐藏态 play-pause/next/prev，主进程与
+> 渲染进程下标一致）、窗口状态记忆（记住/重启恢复/最大化/屏幕外 x=3000 与 x=99999 回退）。
+> 判定细节见 [`desktop/verify.md`](verify.md) 第 2.6–2.9 节；人工清单见第 6 节。
+> 报告 `verify.json` 的 `assertionSummary` 与 `assertions.inherited/added` 就是分组账。
+
+脚本 `node desktop/verify.mjs`（每次用独立 profile `artifacts/desktop/userdata-verify*`，
 启动前清空，不碰真实曲库）。报告 `artifacts/desktop/verify.json`，截图
-`verify-library.png` / `verify-lyrics.png` / `verify-after-hide.png` / `verify-desktop-hidden.png`。
+`verify-library.png` / `verify-lyrics.png` / `verify-after-hide.png` / `verify-desktop-hidden.png` /
+`verify-lyrics-fill.png`。
 **完整判定细节与人工清单在 [`desktop/verify.md`](verify.md)**，这里只记结论与坑。
 
 | 验收条 | 判据（全部打印实测值） | 本次读数 |
@@ -841,8 +850,8 @@ t3 新增（验收）：
 
 | 文件 | 作用 |
 | --- | --- |
-| `desktop/verify.mjs`（新） | t3 验收脚本：窗口+列表 / 双击真播放 / 歌词面板 / **隐藏后继续播**（含 OS 层 EnumWindows 证据与暂停反证）/ 附加托盘退出；报告落 `artifacts/desktop/verify.json` |
-| `desktop/verify.md`（新） | 自动化的判定细节 + 四项人工清单（托盘图标与菜单、重启后自启、隐藏时系统媒体键、托盘退出），每项写明"怎么看/预期/不符合记什么" |
+| `desktop/verify.mjs`（新） | 总验收脚本：t3 四条（窗口+列表 / 双击真播放 / 歌词面板 / 隐藏后继续播，含 EnumWindows 证据与暂停反证、托盘退出）+ t7 三组（补歌词成功/失败/取消、隐藏态托盘播放控制、窗口状态记忆四轮重启）；报告落 `artifacts/desktop/verify.json`，按 `assertionSummary` 分「沿用/新增」 |
+| `desktop/verify.md`（新） | 自动化的判定细节（含 t7 第 2.6–2.9 节）+ 人工清单：t3 四项（第 3 节）、t6 两项（第 5 节）、t7 三项（第 6 节：真实 LyricFlow、托盘文案观感、多显示器拔插） |
 
 t5 新增/修改（补歌词，详见 §9）：
 
