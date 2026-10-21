@@ -22,6 +22,7 @@ import {
   collectFromDirectoryHandle,
   ensureReadPermission,
   getDirectoryPicker,
+  hasReadPermission,
   MUSIC_SOURCE_ID,
   sourceFromFileList,
 } from '../platform/browserMusicSource.js';
@@ -972,6 +973,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return;
       }
       set({ scan: { ...IDLE_SCAN, active: true, phase: 'listing' } });
+      // 重新扫描的原始动机就是"扫描之后目录里才出现的 .lrc"（外部工具写的、
+      // 用户下载完拖进文件夹的）——但 currentSource 是扫描时的快照，新文件
+      // 不在快照里。所以先重新遍历一次目录（能认领到新文件），失败/没权限
+      // 就用快照老路径，**绝不弹权限框、绝不抛异常**（按钮不能点坏）。
+      try {
+        const handle = (await services.storage.loadHandle(MUSIC_SOURCE_ID)) as
+          | DirectoryHandleLike
+          | undefined;
+        // 只查不请求：权限是 prompt/denied 时 queryPermission 会返回 false
+        if (handle && (await hasReadPermission(handle))) {
+          currentSource = (await collect(handle)).source;
+        }
+      } catch (error) {
+        pushNotice(`重新读取目录失败（已用上次的快照）：${sourceErrorMessage(error)}`, 'warn');
+      }
       const stats = await syncLyrics({
         storage: services.storage,
         source: currentSource,
