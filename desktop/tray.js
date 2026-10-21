@@ -16,10 +16,14 @@ const { trayTooltip } = require('./shellText.js');
  * @param {() => boolean} options.isVisible 主窗口当前是否可见（菜单文案换向用）
  * @param {() => boolean} options.getOpenAtLogin 自启开关当前值（checkbox 勾选用）
  * @param {() => string | null} options.getUpdateAvailable 挂起的新版本号（本期恒 null）
+ * @param {() => { status: string, exitCode: number | null }} options.getLyricsToolState 补歌词工具状态（t5 菜单文案）
  * @param {() => void} options.onToggleWindow 左键/菜单：切换窗口显隐
  * @param {() => void} options.onShowWindow 双击兜底：确保窗口可见（双击会先触发两次 click）
  * @param {(checked: boolean) => void} options.onSetOpenAtLogin 菜单：自启开关
  * @param {() => void} options.onQuit 菜单：退出
+ * @param {() => void} options.onFillLyrics 菜单：补歌词（t5）
+ * @param {() => void} options.onChooseMusicFolder 菜单：指定音乐文件夹（t5）
+ * @param {() => void} options.onChooseToolScript 菜单：选择补歌词工具（t5）
  * @returns {{ tray: Electron.Tray, refresh: () => void, describe: () => Array<object>, destroy: () => void }}
  */
 function createAppTray(options) {
@@ -33,17 +37,23 @@ function createAppTray(options) {
 
   let lastTemplate = [];
 
-  /** 状态变化后重建菜单与 tooltip（显隐/自启/更新提示任一变化都要调）。 */
+  /** 状态变化后重建菜单与 tooltip（显隐/自启/更新提示/工具状态任一变化都要调）。 */
   function refresh() {
+    const lyricsState = options.getLyricsToolState ? options.getLyricsToolState() : { status: 'idle' };
     const state = {
       windowVisible: Boolean(options.isVisible()),
       openAtLogin: Boolean(options.getOpenAtLogin()),
       updateAvailable: options.getUpdateAvailable() ?? null,
       version: options.version,
+      lyricsToolStatus: lyricsState?.status,
+      lyricsToolExitCode: lyricsState?.exitCode ?? null,
     };
     const template = buildTrayMenuTemplate(state);
     const click = {
       'toggle-window': () => options.onToggleWindow(),
+      'fill-lyrics': () => options.onFillLyrics?.(),
+      'lyrics-music-folder': () => options.onChooseMusicFolder?.(),
+      'lyrics-tool-settings': () => options.onChooseToolScript?.(),
       'open-at-login': (item) => options.onSetOpenAtLogin(item.checked),
       // 预留位：本期菜单项恒禁用，到不了这里；接线先留好
       'check-update': () => {},

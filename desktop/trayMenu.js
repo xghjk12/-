@@ -10,22 +10,52 @@
  * 菜单结构（Windows 通知区右键）：
  *   显示/隐藏窗口（随可见状态换文案）
  *   ---
+ *   补歌词…（随工具状态换文案：进行中/上次结果）     t5
+ *   指定音乐文件夹…（补歌词工具要的路径）            t5
+ *   选择补歌词工具…（默认内置脚本，可换自己的）      t5
+ *   ---
  *   开机自启（checkbox）
  *   ---
  *   当前版本 / 新版本提示（本期禁用 = 预留位）
  *   ---
  *   退出
  *
- * @param {{ windowVisible: boolean, openAtLogin: boolean, version: string, updateAvailable: string | null }} state
+ * @param {{
+ *   windowVisible: boolean,
+ *   openAtLogin: boolean,
+ *   version: string,
+ *   updateAvailable: string | null,
+ *   lyricsToolStatus?: string,
+ *   lyricsToolExitCode?: number | null,
+ * }} state
  * @returns {Array<object>} electron Menu 模板（不含 click，id 由 tray.js 消费）
  */
-function buildTrayMenuTemplate({ windowVisible, openAtLogin, version, updateAvailable }) {
+function buildTrayMenuTemplate({ windowVisible, openAtLogin, version, updateAvailable, lyricsToolStatus, lyricsToolExitCode }) {
   const items = [];
 
   items.push({
     id: 'toggle-window',
     label: windowVisible ? '隐藏窗口' : '显示窗口',
   });
+
+  items.push({ type: 'separator' });
+
+  // 补歌词：t5。状态化文案——running 时再点会直接拒绝（主进程有 already-running 守卫），
+  // done/failed 提示上一轮结果，帮用户判断"刚才那次怎么样了"。
+  let fillLabel = '补歌词…';
+  if (lyricsToolStatus === 'running') fillLabel = '补歌词…（运行中）';
+  else if (lyricsToolStatus === 'done') fillLabel = '补歌词…（上次成功）';
+  else if (lyricsToolStatus === 'failed') {
+    fillLabel = '补歌词…（上次失败）';
+  }
+  items.push({
+    id: 'fill-lyrics',
+    label: fillLabel,
+    enabled: lyricsToolStatus !== 'running',
+  });
+
+  items.push({ id: 'lyrics-music-folder', label: '指定音乐文件夹…' });
+  items.push({ id: 'lyrics-tool-settings', label: '选择补歌词工具…' });
 
   items.push({ type: 'separator' });
 

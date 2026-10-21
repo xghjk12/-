@@ -2,10 +2,11 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, dialog } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const constants = require('./constants.js');
 const { readAppVersion } = require('./appVersion.js');
 const { installDesktopIpc } = require('./mainIpc.js');
+const { installLyricsIpc } = require('./lyricsIpc.js');
 const { createStaticServer } = require('./staticServer.js');
 const { pinUserData } = require('./userData.js');
 const { createMainWindow } = require('./window.js');
