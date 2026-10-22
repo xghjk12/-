@@ -26,6 +26,10 @@ const { sanitizeWindowState } = require('./windowState.js');
  *    就能同步读到（开窗那一刻就要用）。结构校验交给 windowState.js 的
  *    sanitizeWindowState——不合法就整个丢成 null（下次用默认几何），
  *    半合法的几何会造出一个更怪的窗口。
+ *  - trayHintShown    是否已经提示过"窗口收进托盘了"（t10）。Windows 11 默认把
+ *    新托盘图标收进 ^ 溢出区，用户会以为应用没图标——所以第一次隐藏时弹一次
+ *    气泡，指路到「设置 → 任务栏 → 其他系统托盘图标」。只提示一次，别每
+ *    次都烦人。
  *
  * 纯 Node 模块（不 require electron），单测直接跑：desktop/shellSettings.test.cjs。
  */
@@ -36,6 +40,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   lyricsToolPath: '',
   musicFolderPath: '',
   windowState: null,
+  trayHintShown: false,
 });
 
 function settingsPath(dir) {
@@ -71,6 +76,7 @@ function loadSettings(dir) {
         musicFolderPath: normalizeFolderPath(parsed.musicFolderPath),
         // 旧存档没有这个键（t6 之前写的文件）→ null = 首次启动，用默认几何
         windowState: sanitizeWindowState(parsed.windowState),
+        trayHintShown: parsed.trayHintShown === true,
       };
     }
   } catch {
@@ -95,6 +101,7 @@ function saveSettings(dir, settings) {
     lyricsToolPath: has('lyricsToolPath') ? normalizeToolPath(settings.lyricsToolPath) : current.lyricsToolPath,
     musicFolderPath: has('musicFolderPath') ? normalizeFolderPath(settings.musicFolderPath) : current.musicFolderPath,
     windowState: has('windowState') ? sanitizeWindowState(settings.windowState) : current.windowState,
+    trayHintShown: has('trayHintShown') ? settings.trayHintShown === true : current.trayHintShown,
   };
   const file = settingsPath(dir);
   const tmp = `${file}.tmp-${process.pid}`;

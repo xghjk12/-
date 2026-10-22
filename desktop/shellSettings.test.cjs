@@ -22,7 +22,15 @@ function tmpDir() {
 
 function full(overrides = {}) {
   // windowState 默认 null（t6）：首次启动没有窗口几何，用默认尺寸居中
-  return { openAtLogin: false, lyricsToolPath: '', musicFolderPath: '', windowState: null, ...overrides };
+  // trayHintShown 默认 false（t10）：还没提示过"窗口收进托盘了"
+  return {
+    openAtLogin: false,
+    lyricsToolPath: '',
+    musicFolderPath: '',
+    windowState: null,
+    trayHintShown: false,
+    ...overrides,
+  };
 }
 
 test('目录里没有 settings.json（首次启动）→ 全部默认值', () => {
@@ -99,11 +107,11 @@ test('坏路径读回来是空串而不是抛异常或带病存活', () => {
   assert.deepEqual(loadSettings(dir), full());
 });
 
-test('未知键不落盘（schema 显式四键，多余的丢弃）', () => {
+test('未知键不落盘（schema 显式五键，多余的丢弃）', () => {
   const dir = tmpDir();
   saveSettings(dir, { openAtLogin: true, somethingElse: 'x' });
   const raw = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
-  assert.deepEqual(raw, { openAtLogin: true, lyricsToolPath: '', musicFolderPath: '', windowState: null });
+  assert.deepEqual(raw, full({ openAtLogin: true }));
 });
 
 test('settings.json 损坏 → 默认值，不抛异常', () => {
@@ -204,6 +212,29 @@ test('显式传 windowState: null 可以清掉（"忘掉上次的位置"）', ()
   saveSettings(dir, { windowState: { x: 10, y: 20, width: 1000, height: 700, maximized: true } });
   saveSettings(dir, { windowState: null });
   assert.equal(loadSettings(dir).windowState, null);
+});
+
+test('trayHintShown：默认 false，存 true 后读回 true，且不污染其它键', () => {
+  const dir = tmpDir();
+  assert.equal(loadSettings(dir).trayHintShown, false);
+
+  saveSettings(dir, { openAtLogin: true, musicFolderPath: 'D:\\音乐' });
+  saveSettings(dir, { trayHintShown: true });
+
+  assert.equal(loadSettings(dir).trayHintShown, true);
+  // 部分更新语义：写 trayHintShown 不能把自启和路径冲掉
+  assert.equal(loadSettings(dir).openAtLogin, true);
+  assert.equal(loadSettings(dir).musicFolderPath, 'D:\\音乐');
+});
+
+test('trayHintShown 只认 ===true（字符串 "true" 不算）', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(
+    path.join(dir, 'settings.json'),
+    JSON.stringify({ trayHintShown: 'true' }),
+    'utf8',
+  );
+  assert.equal(loadSettings(dir).trayHintShown, false);
 });
 
 test('windowState 不会被存档里的多余字段带脏（只认五个键）', () => {

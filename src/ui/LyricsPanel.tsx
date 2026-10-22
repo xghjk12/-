@@ -17,7 +17,7 @@ import { useEffect, useRef, useState } from 'react';
 import { currentLineIndex, lyricSearchKeyword, buildLyricSearchUrl } from '../core/lyrics.js';
 import { effectiveOffsetSec, readLyricFile, useLyrics } from './lyrics.js';
 import { readLiveProgress, useAppStore } from './store.js';
-import { hasDesktopLyricsBridge, useDesktopLyrics } from './desktopLyrics.js';
+import { describeToolStatus, hasDesktopLyricsBridge, useDesktopLyrics } from './desktopLyrics.js';
 import type { DesktopLyricsToolStatus } from './desktopLyrics.js';
 import { CloseIcon, MusicIcon, SearchIcon, WarnIcon } from './Icons.js';
 
@@ -32,20 +32,7 @@ const SOURCE_LABEL: Record<string, string> = {
  * 字眼；done 叫完成；只有 failed 才叫失败（带退出码，用户拿它对工具日志）。
  */
 function toolStatusText(status: DesktopLyricsToolStatus): string {
-  switch (status.status) {
-    case 'running':
-      return '补歌词工具运行中';
-    case 'done':
-      return '补歌词完成，已重新扫描';
-    case 'cancelled':
-      return '已取消补歌词';
-    case 'failed':
-      return status.exitCode !== null
-        ? `补歌词失败（退出码 ${status.exitCode}）`
-        : `补歌词失败${status.error ? `：${status.error}` : ''}`;
-    default:
-      return '';
-  }
+  return describeToolStatus(status);
 }
 
 /** 当前曲目的路径：优先播放队列里的当前项，否则用"上次播放"。 */

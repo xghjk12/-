@@ -803,6 +803,22 @@ await app.evaluate((type) => globalThis.__qingyinDesktopShell.playbackCommand(ty
 
 这两条都不是 bug，是 Electron/Windows 的既有行为；断言写死了就会红得毫无信息量。
 
+### 坑 14（t10）：跑桌面端自动化之前，必须先退出正在运行的实例
+
+**origin 的端口是固定 53140**（这是刻意的，换端口等于换 origin、等于用户数据蒸发）。
+所以同一时间**只能有一个实例**：手动开着的应用占着那个端口，验收脚本再拉起第二个实例时，
+第二个会因为 `EADDRINUSE` 走"弹框并退出"的分支 → Playwright 等不到 CDP → 报
+`electron.launch: Timeout 60000ms exceeded` 或 `read ECONNRESET`。
+
+**这两个报错看着像产品崩了，其实是被自己占用了。** 跑 `verify.mjs` / `checkTray*.js` /
+`checkLyricsTool.js` / `checkWindowState.js` 之前先：
+
+```powershell
+Get-Process -Name electron -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+（注意：这也意味着用户开着应用时不能并行跑自动化；验证脚本之间也必须串行。）
+
 ---
 
 ## 6. 文件清单

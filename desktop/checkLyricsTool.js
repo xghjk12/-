@@ -273,6 +273,20 @@ async function main() {
           problems.push('补歌词/自动重扫把正在放的音乐打断了');
         }
 
+        // 入口可发现性（真实反馈："在软件页面里找不到补歌词的按钮"）：
+        // 补歌词是整个曲库的操作，侧栏必须有**常驻**入口，而不是只藏在
+        // "这首歌没有歌词"的空状态里。
+        const sidebarEntry = await win.evaluate(() => {
+          const buttons = [...document.querySelectorAll('.sidebar-actions button')];
+          const hit = buttons.find((b) => (b.textContent ?? '').includes('补歌词'));
+          return { found: Boolean(hit), label: (hit?.textContent ?? '').trim() };
+        });
+        facts.sidebarEntry = sidebarEntry.found;
+        console.log(
+          `侧栏补歌词入口: ${sidebarEntry.found ? `有（「${sidebarEntry.label}」）` : '没有'}`,
+        );
+        if (!sidebarEntry.found) problems.push('侧栏没有补歌词入口（用户找不到工具）');
+
         // 面板级验证：当前曲目就是唯一曲目 → 打开歌词面板 → 能看到假工具写的句子
         if (lyricsClaimed) {
           await win.keyboard.press('y');

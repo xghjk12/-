@@ -218,6 +218,28 @@ function hideMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.hide();
   tray?.refresh();
+  showTrayHintOnce();
+}
+
+/**
+ * 第一次把窗口收进托盘时提示一次。
+ *
+ * Windows 11 默认把新托盘图标收进 ^ 溢出区，用户反馈"托盘根本没有图标"——
+ * 这不是 bug，是系统行为，且系统没给应用"自己固定"的 API。所以用一次气泡
+ * 指路（设置 → 任务栏 → 其他系统托盘图标），写进 settings 后不再重复。
+ * 气泡弹不出来（被专注助手拦、非 Windows）就不落标记，下次还有机会。
+ */
+function showTrayHintOnce() {
+  if (settings.trayHintShown) return;
+  const shown = tray?.showBalloon?.({
+    title: '轻音播放仍在运行',
+    content:
+      '窗口已收进托盘，音乐继续播放。Windows 11 默认把新图标收在任务栏的 ^ 里，' +
+      '可在「设置 → 任务栏 → 其他系统托盘图标」把它打开。真退出请用托盘菜单的「退出」。',
+  });
+  if (shown) {
+    settings = saveSettings(userDataDir, { trayHintShown: true });
+  }
 }
 
 function toggleMainWindow() {

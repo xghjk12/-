@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from './store.js';
 import {
+  describeToolStatus,
   initDesktopLyrics,
   resetDesktopLyricsForTest,
   startFillLyrics,
@@ -72,6 +73,27 @@ beforeEach(() => {
   rescanMock.mockClear();
   useAppStore.setState({
     rescanLyrics: rescanMock as unknown as () => Promise<void>,
+  });
+});
+
+describe('状态文案（面板与侧栏共用一份）', () => {
+  it('running / done / cancelled 各用自己的说法，cancelled 绝不带"失败"', () => {
+    expect(describeToolStatus(statusOf({ status: 'running' }))).toBe('补歌词工具运行中');
+    expect(describeToolStatus(statusOf({ status: 'done', exitCode: 0 }))).toBe('补歌词完成，已重新扫描');
+    const cancelled = describeToolStatus(statusOf({ status: 'cancelled' }));
+    expect(cancelled).toBe('已取消补歌词');
+    expect(cancelled).not.toContain('失败');
+  });
+
+  it('failed 有退出码时带退出码，没有时带错误原因', () => {
+    expect(describeToolStatus(statusOf({ status: 'failed', exitCode: 5 }))).toBe('补歌词失败（退出码 5）');
+    expect(describeToolStatus(statusOf({ status: 'failed', error: '工具路径不存在' }))).toBe(
+      '补歌词失败：工具路径不存在',
+    );
+  });
+
+  it('idle 不出文案（侧栏与面板都用 `status !== idle` 才渲染）', () => {
+    expect(describeToolStatus(statusOf({ status: 'idle' }))).toBe('');
   });
 });
 

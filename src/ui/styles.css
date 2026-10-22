@@ -241,6 +241,34 @@ button {
   gap: 8px;
 }
 
+/* 补歌词工具的即时状态（侧栏）。running 时后面跟一个「取消」按钮 */
+.sidebar-tool-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.sidebar-tool-status[data-tool-status='done'] {
+  color: var(--accent);
+}
+
+.sidebar-tool-status[data-tool-status='failed'] {
+  color: var(--warn, #e08a5a);
+}
+
+.sidebar-tool-status .btn {
+  padding: 3px 7px;
+  font-size: 11.5px;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;

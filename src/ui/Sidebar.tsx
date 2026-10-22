@@ -13,6 +13,7 @@ import { formatDuration } from '../core/format.js';
 import { libraryStats, useAppStore, viewCounts } from './store.js';
 import type { LibraryView } from './store.js';
 import { FolderIcon, MusicIcon, RefreshIcon, WarnIcon } from './Icons.js';
+import { describeToolStatus, hasDesktopLyricsBridge, useDesktopLyrics } from './desktopLyrics.js';
 
 const VIEWS: Array<{ key: LibraryView; label: string; hint: string }> = [
   { key: 'all', label: '全部曲目', hint: '平铺列表' },
@@ -44,6 +45,9 @@ export function Sidebar() {
   const inputRef = useRef<HTMLInputElement>(null);
   const stats = libraryStats(tracks);
   const counts = viewCounts(tracks, recentPaths);
+  // 桌面端才有补歌词工具；web/PWA 里桥不存在 → 入口整体不渲染（不是禁用）
+  const desktopLyricsAvailable = hasDesktopLyricsBridge();
+  const desktopLyrics = useDesktopLyrics();
 
   return (
     <aside className="sidebar">
@@ -61,6 +65,22 @@ export function Sidebar() {
         <button className="btn btn-primary" onClick={() => void pickDirectory()} disabled={scanning}>
           <FolderIcon /> 选择音乐文件夹
         </button>
+        {/*
+          补歌词是**整个曲库**的操作（外部工具扫文件夹、写同名 .lrc），
+          所以入口必须在左侧常驻，而不是藏在"某首歌没有歌词时的空状态"里——
+          后者是真实使用反馈里"找不到补歌词按钮"的根因。
+          桥不存在（纯 web/PWA）时连 DOM 都不渲染。
+        */}
+        {desktopLyricsAvailable && (
+          <button
+            className="btn"
+            onClick={desktopLyrics.start}
+            disabled={scanning || desktopLyrics.status?.status === 'running'}
+            title="调用外部工具给整个曲库补歌词；完成后自动重新扫描认领"
+          >
+            <MusicIcon /> 补歌词…
+          </button>
+        )}
         {canRestore && !hasSource && (
           <button className="btn" onClick={() => void restoreLibrary()} disabled={scanning}>
             <RefreshIcon /> 恢复曲库（需一次授权）
@@ -83,6 +103,16 @@ export function Sidebar() {
             event.target.value = '';
           }}
         />
+        {desktopLyricsAvailable && desktopLyrics.status && desktopLyrics.status.status !== 'idle' && (
+          <p className="sidebar-tool-status" data-tool-status={desktopLyrics.status.status}>
+            <span>{describeToolStatus(desktopLyrics.status)}</span>
+            {desktopLyrics.status.status === 'running' && (
+              <button className="btn btn-quiet" onClick={desktopLyrics.cancel}>
+                取消
+              </button>
+            )}
+          </p>
+        )}
       </div>
 
       <div className="sidebar-source">

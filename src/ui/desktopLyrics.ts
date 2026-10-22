@@ -127,7 +127,31 @@ export function resetDesktopLyricsForTest(): void {
   listeners.clear();
 }
 
-/** React 侧的状态视图（LyricsPanel 的按钮与状态行用）。 */
+/**
+ * 工具状态的展示文案。
+ *
+ * 放在这里而不是组件里：歌词面板与侧栏都要显示同一份状态，两处各写一份措辞必然漂移。
+ * 语义约定：cancelled 是**中性**的（绝不带"失败"字眼），done 叫完成，
+ * 只有 failed 才叫失败（带退出码，用户拿它对工具日志）。
+ */
+export function describeToolStatus(status: DesktopLyricsToolStatus): string {
+  switch (status.status) {
+    case 'running':
+      return '补歌词工具运行中';
+    case 'done':
+      return '补歌词完成，已重新扫描';
+    case 'cancelled':
+      return '已取消补歌词';
+    case 'failed':
+      return status.exitCode !== null
+        ? `补歌词失败（退出码 ${status.exitCode}）`
+        : `补歌词失败${status.error ? `：${status.error}` : ''}`;
+    default:
+      return '';
+  }
+}
+
+/** React 侧的状态视图（歌词面板与侧栏共用）。 */
 export interface DesktopLyricsView {
   status: DesktopLyricsToolStatus | null;
   start: () => void;

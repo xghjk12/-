@@ -301,6 +301,24 @@ try {
   // ---- 歌词：入口可见性 → 自动认领 → 面板高亮 → 点击跳转 ----
   console.log('\n== 4d 歌词 ==');
 
+  // 补歌词入口是桌面端专属：纯 web 里**必须连 DOM 都不存在**（不是禁用）。
+  // 真实反馈：有人在 web 版找补歌词按钮——它本来就不该出现。
+  const desktopOnlyEntries = await page.evaluate(() => ({
+    sidebar: [...document.querySelectorAll('.sidebar-actions button')].some((b) =>
+      (b.textContent ?? '').includes('补歌词'),
+    ),
+    anyButton: [...document.querySelectorAll('button')].some((b) =>
+      (b.textContent ?? '').includes('补歌词工具'),
+    ),
+    toolStatus: Boolean(document.querySelector('.sidebar-tool-status')),
+  }));
+  console.log(
+    `   web 版桌面专属入口：侧栏补歌词 ${desktopOnlyEntries.sidebar}、面板补歌词工具 ${desktopOnlyEntries.anyButton}、工具状态行 ${desktopOnlyEntries.toolStatus}`,
+  );
+  if (desktopOnlyEntries.sidebar || desktopOnlyEntries.anyButton || desktopOnlyEntries.toolStatus) {
+    problems.push('web 版里出现了桌面端专属的补歌词入口（桥不存在时必须不渲染）');
+  }
+
   // 入口 1：侧栏的「歌词」（真实反馈里"没找到歌词的入口"，所以这条要钉死）
   await page.click('button.nav-item:has-text("歌词")');
   await page.waitForSelector('.drawer', { timeout: 10_000 });

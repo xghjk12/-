@@ -99,6 +99,23 @@ function createAppTray(options) {
   return {
     tray,
     refresh,
+    /**
+     * Windows 通知区气泡（第一次收进托盘时指路用）。
+     *
+     * 为什么需要它：**Windows 11 默认把新的托盘图标收进任务栏的 ^ 溢出区**，
+     * 用户会以为"应用根本没有托盘图标"（真实使用反馈就是这句）。系统不给
+     * 应用任何"把自己固定到可见区"的 API，只能弹一次提示告诉他去哪儿找。
+     * 非 Windows 或调用失败都返回 false，绝不抛。
+     */
+    showBalloon: ({ title, content }) => {
+      if (process.platform !== 'win32') return false;
+      try {
+        tray.displayBalloon({ title, content, iconType: 'info' });
+        return true;
+      } catch {
+        return false;
+      }
+    },
     /** 给验证脚本（checkTray.js 的 app.evaluate）用的 JSON 安全快照。 */
     describe: () =>
       lastTemplate.map((item) => ({
