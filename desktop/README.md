@@ -819,6 +819,39 @@ Get-Process -Name electron -ErrorAction SilentlyContinue | Stop-Process -Force
 
 （注意：这也意味着用户开着应用时不能并行跑自动化；验证脚本之间也必须串行。）
 
+### 坑 15（t11）：`.ps1` 必须带 UTF-8 BOM；调用外部 Python 工具要切 cwd 且别让 Stop 吃掉 stderr
+
+用户点「补歌词」看到 **「补歌词失败（退出码 1）」**，连查三层才见底。三个都是真实故障，
+且**当时没有任何自动化能发现**（E2E 用的是 `fake-fill-lyrics.ps1`，真脚本只写在人工清单里）：
+
+1. **`.ps1` 缺 UTF-8 BOM → 语法错误。** 本机 `powershell.exe` 是 Windows PowerShell 5.1，
+   对无 BOM 文件按 ANSI/OEM 解析。脚本里有中文注释与提示，用"写 UTF-8 无 BOM"的编辑器改一下，
+   中文立刻变乱码，重则 `Unexpected token`。**这种变化在 `git diff` 里看不出来**（字节差异不是文本差异）。
+   → 已加测试 `desktop/scripts-encoding.test.cjs`：所有 `.ps1` 必须有 BOM 且不含 U+FFFD。
+2. **注释写了"在工具根目录跑"，代码却没切目录** → `No module named src.main`
+   （`src/main.py` 用相对导入，必须以 `-m src.main` 且 cwd = `artifacts/lyricflow`）。
+3. **`$ErrorActionPreference='Stop'` + 子进程写 stderr = 刚启动就退出 1。**
+   LyricFlow 的日志走 stderr，在 `Stop` 下第一条日志就是"终止错误"，真正的业务日志一条都传不出来。
+   调用原生程序时要临时 `$ErrorActionPreference='Continue'`。
+
+前两条会让脚本"看起来在跑但立刻死"，第三条会让**错误信息完全丢失**——所以排查时先确认
+**能拿到子进程的完整 stderr**（`Start-Process -RedirectStandardOutput/-RedirectStandardError`），
+别只用 `2>&1` 看 PowerShell 的转述。
+
+现在脚本提供两个**不联网**的自检模式，并已进回归（`desktop/fillLyricsScript.test.cjs`，
+venv 不存在时自动 skip）：
+
+```powershell
+# 只验证能不能 import 到 src.main（cwd 正确性）
+powershell -ExecutionPolicy Bypass -File desktop\tools\fill-lyrics.ps1 -Preflight
+
+# 用空临时目录完整跑一轮 LyricFlow（0 首 → 不发网络请求），覆盖 cwd/编码/退出码传导
+powershell -ExecutionPolicy Bypass -File desktop\tools\fill-lyrics.ps1 -SelfTest
+```
+
+**教训**：外部工具这条路，假工具 E2E 只能证明"壳层联通"，证明不了"真工具能跑"。
+凡是"包装别人程序"的功能，至少要有一个**不联网也能跑真程序**的自检模式进回归。
+
 ---
 
 ## 6. 文件清单
