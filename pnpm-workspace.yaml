@@ -1,0 +1,14 @@
+# pnpm 12 的构建脚本批准表。
+#
+# 为什么需要这个文件：pnpm 12 把这个设置从 package.json 的
+# `pnpm.onlyBuiltDependencies` 搬到了这里，仓库里没有它时**所有 postinstall 都被跳过**。
+# 后果很具体：`pnpm install` 装好 electron 的 npm 包后不下载二进制，
+# 于是 electron/ 下没有 dist/，启动就报 "Electron failed to install correctly"。
+# README 里一直让人手工跑 `node desktop/installElectron.js` 就是在绕这个坑（坑 17）。
+#
+# 现在显式批准 electron，`pnpm install` 一次到位。
+allowBuilds:
+  electron: true
+  # electron-winstaller 只在打 Squirrel.Windows 目标时才用（本项目用 NSIS），
+  # 批准它会多下一套工具链，没必要。
+  electron-winstaller: false

@@ -21,3 +21,6 @@ artifacts/
 
 # AgentTeams 鐨勮繍琛屾椂鐘舵�侊紙鍥㈤槦瀹氫箟銆佹敹浠剁銆佷换鍔¤褰曪級锛氬睘浜庡伐鍏风姸鎬侊紝涓嶈繘浠撳簱
 .agent-teams/
+
+# electron-builder 在 desktop/ 下用 npm 搜索依赖时会生成它，本项目用 pnpm
+desktop/package-lock.json

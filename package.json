@@ -21,6 +21,7 @@
     "check:static": "node scripts/check-ui-static.mjs",
     "check:ui": "node scripts/check-ui.mjs",
     "bench": "node scripts/bench-library.mjs",
+    "dist": "node scripts/build-app.mjs",
     "verify": "pnpm typecheck && pnpm test && pnpm test:desktop && pnpm test:demo && pnpm check:static && pnpm check:bundle"
   },
   "dependencies": {
@@ -37,6 +38,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "electron": "^44.9.1",
+    "electron-builder": "^26.15.3",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^30.1.1",
     "playwright-core": "^1.63.0",

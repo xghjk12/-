@@ -33,8 +33,46 @@ const { APP_ID } = require('./constants.js');
 
 const SWITCH_PREFIX = '--user-data-dir=';
 
+/**
+ * 应用根目录 = 「dist/ 和 desktop/ 的父目录」。
+ *
+ *  - 开发时：`electron desktop` → __dirname 是 <repo>/desktop → 根就是仓库根
+ *  - 打包后：main.js 在 <安装目录>/resources/app.asar/desktop/ 里，
+ *    `resolve(__dirname, '..')` 得到的是 **app.asar 自身**，而 dist 用
+ *    extraResources 放在 <安装目录>/resources/dist（asar 外面）——
+ *    两者差一层，必须探一下再决定。
+ *
+ * 为什么先探再决定而不是按 isPackaged 分支：探的是**文件系统事实**，
+ * 即使将来改打包布局（比如把 dist 挪进 asar）也不用改这里。
+ */
 function repoRoot() {
-  return path.resolve(__dirname, '..');
+  const parent = path.resolve(__dirname, '..');
+  // 普通形态：<根>/desktop/../dist 就是前端产物
+  if (fs.existsSync(path.join(parent, 'dist', 'index.html'))) return parent;
+  // 打包形态：__dirname 在 app.asar/desktop 内，dist 在 process.resourcesPath 下
+  try {
+    const { app } = require('electron');
+    if (app.isPackaged && process.resourcesPath) return process.resourcesPath;
+  } catch {
+    // 纯 Node 单测环境：没有 electron，保持原推导
+  }
+  return parent;
+}
+
+/**
+ * 打包后能不能把数据放回安装目录。
+ *
+ * 用户双击安装的程序不该往自己的安装目录里写数据（Program Files 通常只读、
+ * 也可能被安全软件拦）。开发形态下保留原来的"仓库内备用目录"，因为那时候
+ * 用户就是在这个目录里工作，数据落在 artifacts/ 里最好查。
+ */
+function isPackaged() {
+  try {
+    // require electron 在纯 Node 单测里会失败，那时必然不是打包形态
+    return require('electron').app.isPackaged === true;
+  } catch {
+    return false;
+  }
 }
 
 function fromSwitch() {
@@ -70,8 +108,12 @@ function resolveUserDataDir() {
     return { dir: requested, requested, fellBack: false };
   }
 
-  const fallback = path.join(repoRoot(), 'artifacts', 'desktop', 'userdata');
-  const reason = `无法在 ${requested} 下创建目录（多半是安全软件拦了 electron.exe 写用户目录）`;
+  // 备用目录只在**开发形态**下用。打包后的程序如果往安装目录里写，
+  // 用户重装/升级就会丢数据，所以宁可退回系统临时目录并明确告知。
+  const fallback = isPackaged()
+    ? path.join(app.getPath('temp'), APP_ID)
+    : path.join(repoRoot(), 'artifacts', 'desktop', 'userdata');
+  const reason = `无法在 ${requested} 下创建目录（多半是安全软件拦了应用写用户目录）`;
   if (isWritable(fallback)) {
     return { dir: fallback, requested, fellBack: true, reason };
   }
@@ -89,4 +131,4 @@ function pinUserData() {
   return resolved;
 }
 
-module.exports = { pinUserData, resolveUserDataDir, isWritable };
+module.exports = { pinUserData, resolveUserDataDir, isWritable, repoRoot };

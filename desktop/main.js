@@ -1,5 +1,23 @@
 'use strict';
 
+// 排障钩子：`QINGYIN_BOOT_TRACE=<文件路径>` 时把启动各阶段写进文件。
+// 打包后没有终端，静默退出时这是唯一能看到"死在哪一步"的手段。
+// 平时不设这个环境变量，开销为零。
+const bootTraceFile = process.env.QINGYIN_BOOT_TRACE || null;
+function bootTrace(step, extra) {
+  if (!bootTraceFile) return;
+  try {
+    require('node:fs').appendFileSync(
+      bootTraceFile,
+      `${new Date().toISOString()} ${step}${extra ? ` ${extra}` : ''}\n`,
+      'utf8',
+    );
+  } catch {
+    // 写不了就算了，排障钩子不许影响启动
+  }
+}
+bootTrace('main.js loaded', `argv=${JSON.stringify(process.argv.slice(1))}`);
+
 const fs = require('node:fs');
 const path = require('node:path');
 const { app, BrowserWindow, dialog, screen } = require('electron');
@@ -8,7 +26,7 @@ const { readAppVersion } = require('./appVersion.js');
 const { installDesktopIpc } = require('./mainIpc.js');
 const { installLyricsIpc } = require('./lyricsIpc.js');
 const { createStaticServer } = require('./staticServer.js');
-const { pinUserData } = require('./userData.js');
+const { pinUserData, repoRoot: resolveAppRoot } = require('./userData.js');
 const { createMainWindow } = require('./window.js');
 const { createAppTray } = require('./tray.js');
 const { loadSettings, saveSettings } = require('./shellSettings.js');
@@ -39,9 +57,11 @@ const {
  */
 
 // ---- ready 之前：钉死身份与数据目录（顺序不能动，详见 userData.js 的注释）----
+bootTrace('before pinUserData');
 const userDataChoice = pinUserData();
 // pinUserData 内部已经 setPath，这之后 getPath('userData') 才安全（坑 1）
 const userDataDir = app.getPath('userData');
+bootTrace('after pinUserData', `dir=${userDataDir} fellBack=${userDataChoice.fellBack}`);
 
 // 系统身份：只补 AppUserModelID，**不要在这里再调 app.setName**。
 //  - `pinUserData()` 内部已经 `app.setName(APP_ID)`，且 userData 路径按 APP_ID 钉死；
@@ -51,7 +71,10 @@ const userDataDir = app.getPath('userData');
 //    未打包的 Electron 默认没有它。它**不能**修好"托盘没有图标"（根因见 README 坑 16）。
 app.setAppUserModelId(constants.APP_ID);
 
-const repoRoot = path.resolve(__dirname, '..');
+// 应用根：开发形态是仓库根，打包形态是 <安装目录>/resources（dist 在那里）。
+// 推导细节见 userData.js 的 repoRoot —— 不要在别处再写一次 resolve(__dirname, '..')。
+const repoRoot = resolveAppRoot();
+bootTrace('repoRoot resolved', repoRoot);
 const distDir = path.join(repoRoot, constants.DIST_DIRNAME);
 
 // 版本号唯一真相是仓库根 package.json；打包后（仓库不在了）才退回 app.getVersion()
@@ -115,6 +138,17 @@ function readArgValue(flag) {
 }
 
 function fail(title, detail) {
+  // 打包后没有终端，dialog.showErrorBox 是**唯一**能让用户看到原因的东西；
+  // 但如果是无头环境（自动化/远程）弹不出来，那就至少留下痕迹。
+  // 加 `--qingyin-crash-log=<path>` 时把原因写文件，排障用。
+  const crashLog = readArgValue('--qingyin-crash-log');
+  if (crashLog) {
+    try {
+      fs.appendFileSync(crashLog, `[fail] ${title}\n${detail}\n\n`, 'utf8');
+    } catch {
+      // 写不了就算了，别在错误处理里再抛
+    }
+  }
   // showErrorBox 不依赖窗口，ready 前后都能用
   dialog.showErrorBox(title, detail);
   app.exit(1);
@@ -316,10 +350,31 @@ function toggleMainWindow() {
 
 // ---- 托盘 ----
 
+/**
+ * 补歌词内置脚本的真实路径。
+ *
+ * 两个候选：仓库里（开发）与 resources/tools（打包，asar 外面）。
+ * 刻意用 existsSync 逐个探，而不是按 isPackaged 硬分支——路径是文件系统事实，
+ * 探出来的永远是对的；哪天打包布局换了也不会静默失效。
+ *
+ * 为什么不能留在 asar 里：`powershell.exe` 是独立进程，它不理解 asar 虚拟路径，
+ * 传进去的 `-File <...>.ps1` 在它眼里不存在 → 用户点「补歌词」必然失败，
+ * 而且报错像是脚本本身的问题（查起来非常绕）。
+ */
+function resolveBuiltInScriptPath() {
+  const candidates = [
+    path.join(repoRoot, 'tools', 'fill-lyrics.ps1'), // 打包：resources/tools
+    path.join(repoRoot, 'desktop', 'tools', 'fill-lyrics.ps1'), // 开发：仓库根
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[1];
+}
+
 function createTray() {
   const iconCandidates = [
-    path.join(distDir, 'icons', 'icon-192.png'), // 构建产物
+    path.join(distDir, 'icons', 'icon-192.png'), // 构建产物（开发与打包都有）
+    path.join(repoRoot, 'dist', 'icons', 'icon-192.png'), // 打包后 repoRoot 就是 resources
     path.join(repoRoot, 'public', 'icons', 'icon-192.png'), // 开发目录回退
+    path.join(__dirname, '..', 'public', 'icons', 'icon-192.png'), // asar 外的仓库资源（兜底）
   ];
   const iconPath = iconCandidates.find((candidate) => fs.existsSync(candidate));
   if (!iconPath) {
@@ -474,7 +529,9 @@ function quitApp() {
 }
 
 async function boot() {
+  bootTrace('boot() entered');
   if (!ensureDist()) return;
+  bootTrace('dist ok', distDir);
 
   staticServer = createStaticServer({
     root: distDir,
@@ -483,6 +540,7 @@ async function boot() {
 
   try {
     await staticServer.listen();
+    bootTrace('static server listening', `port=${staticServer.port}`);
   } catch (error) {
     if (error && error.code === 'EADDRINUSE') {
       fail(
@@ -510,7 +568,9 @@ async function boot() {
   // t5：补歌词 IPC（lyrics:run/status/cancel）。目录选择对话框也从这里接，
   // 挂在 createWindow 之后 createTray 之前——托盘菜单的「补歌词…」从第一秒就能点。
   lyrics = installLyricsIpc({
-    builtInScriptPath: path.join(repoRoot, 'desktop', 'tools', 'fill-lyrics.ps1'),
+    // 补歌词内置脚本。打包后它在 <安装目录>/resources/tools（asar 外面，见打包配置的
+    // extraResources）——powershell.exe 看不见 asar，脚本必须是真的文件。开发形态在 desktop/tools。
+    builtInScriptPath: resolveBuiltInScriptPath(),
     getSettings: () => settings,
     saveSettingsPatch: (patch) => {
       settings = saveSettings(userDataDir, patch);
@@ -604,16 +664,24 @@ async function boot() {
 
 // ---- 单实例：固定端口下，第二个实例只会撞端口 ----
 if (!app.requestSingleInstanceLock()) {
+  // 走到这里 = 已经有一个实例占着同一个 userData（锁按 userData 键控）。
+  // 静默退出会让用户以为"双击没反应"，所以至少留一条痕（打包后没有终端，
+  // 平时用户看到的现象就是"图标闪一下就没了"——这也正是第二次双击的正常行为）。
+  bootTrace('single-instance lock NOT acquired → quitting (已有一个实例在运行)');
   app.quit();
 } else {
+  bootTrace('single-instance lock acquired');
   app.on('second-instance', () => {
     // 关窗进托盘后音乐还在放：再点一次图标/快捷方式应该把窗口唤回来，
     // 而不是把正在放歌的实例干掉、也不是再开一个窗口
+    bootTrace('second-instance received → showing existing window');
     showMainWindow();
   });
 
   app.whenReady().then(() => {
+    bootTrace('app ready');
     void boot().catch((error) => {
+      bootTrace('boot() threw', error instanceof Error ? (error.stack ?? error.message) : String(error));
       fail('桌面端启动失败', error instanceof Error ? (error.stack ?? error.message) : String(error));
     });
   });

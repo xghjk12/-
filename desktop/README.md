@@ -902,6 +902,64 @@ node_modules\electron\dist\electron.exe desktop --no-sandbox --enable-logging
 （`trayCreated: true` 在图标根本没出现时也是 true）。这类 API 必须断言**副作用**，
 而副作用在原生日志里——那就去读原生日志。
 
+### 坑 17（t13）：把开发形态打成"能双击安装的软件"——五个坑逐个踩过
+
+用户的原话是"**我想要的是一个软件程序**"。开发形态（`electron desktop` + 命令行）
+不算软件。`pnpm dist` 现在产出一个 NSIS 安装包（`artifacts/dist-app/轻音播放-<版本>-安装包.exe`，
+约 107MB），装完开始菜单/桌面有快捷方式、控制面板能卸载。下面是打通过程中真正卡住的地方：
+
+1. **`electron-builder` 必须以 `desktop/` 为应用根，且只能通过 CLI 传。**
+   用仓库根当应用根会去找 `index.js`，报
+   `Application entry file "index.js" ... is corrupted`（根 package.json 是 `type: module`
+   且没有 `main`）。而 `appDirectory` **不是配置字段**，写进 config 会被 schema 校验拒掉：
+   必须 `--projectDir desktop`。`--config` 则要给**绝对路径**——`--projectDir` 会改掉
+   解析基准，相对路径会被找去 `desktop/` 下面。
+2. **`electronVersion` 必须精确。** 根 package.json 写的是 `^44.9.1`（范围），
+   builder 直接拒绝打包。配置里从 `require('electron/package.json').version` 读真实版本钉进去。
+3. **打包后 `resolve(__dirname, '..')` 少一层。** asar 里 main.js 在
+   `<app>.asar/desktop/` 内，`'..'` 得到的是 **app.asar 本身**，而 `dist/` 用
+   extraResources 放在 asar **外面**的 `<安装目录>/resources/dist`。
+   → `userData.js` 的 `repoRoot()` 改成"先探 `../dist/index.html` 存在就当根，
+   否则用 `process.resourcesPath`"，探的是文件系统事实而不是猜 `isPackaged`。
+4. **`.ps1` 不能留在 asar 里。** `powershell.exe` 是独立进程，看不见 asar 这个虚拟容器，
+   `-File` 指进去的路径在它眼里不存在 → 用户点「补歌词」必然失败。
+   `desktop/tools/` 已用 extraResources 放到 `<安装目录>/resources/tools`，
+   `main.js` 里 `resolveBuiltInScriptPath()` 两个候选逐个 `existsSync` 探。
+5. **`pnpm 12` 默认跳过 postinstall → electron 没有二进制。** 装 `electron-builder`
+   时 pnpm 顺手把 `electron` 的 `dist/` 清掉了，症状是 `lyricsIpc.test.cjs` 报
+   `Electron failed to install correctly`。修法不是"再跑一次安装脚本"，而是把批准表
+   写进 `pnpm-workspace.yaml`（`allowBuilds: electron: true`），让 `pnpm install` 一次到位。
+
+**打包白名单必须被测试钉住。** 漏一个运行期文件 = 用户装完打不开，而开发形态完全看不出来。
+`desktop/packaging.test.cjs` 从 `entry.js` 出发按 `require('./x')` 递归走依赖图，
+要求每个文件都在 `build/desktopRuntimeFiles.js` 的白名单里；刻意排除的文件
+（如 `probe.js`）还要验证引用处有 `existsSync` 守卫。给 main.js 加新模块忘了加白名单，
+`pnpm verify` 立刻红。
+
+### 坑 18（t13）：打包版"启动后静默崩溃"——是 GamePP 注入 DLL，不是我们的代码
+
+打包版起来后打印完四行启动日志就 `0xC0000005` 崩掉，全程无任何报错。排了很久，
+记录关键手段与结论：
+
+**手段**（打包后没有终端，这几条是唯一能看见真相的路径）：
+- `QINGYIN_BOOT_TRACE=<文件>` 环境变量：`main.js` 在最早期就每次 append 一行阶段标记
+  （`main.js loaded` → `pinUserData` → `repoRoot` → `single-instance lock` →
+  `app ready` → `boot()` → `static server listening`）。靠它把崩溃点精确到"监听成功后、建窗口前"。
+- Windows 事件查看器（Application / Id=1000）：**这一步才是决定性的**，
+  它直接给出了崩溃模块：`GPP64.dll`，位于
+  `%LOCALAPPDATA%\GamePPSDK\...\GPP64.dll`。
+
+**结论**：腾讯的 GamePP（游戏加加）通过 `GamePPLite.exe` 往**每个**新进程注入
+`GPP64.dll`。它和 Electron 的初始化冲突，表现为 `0xC0000005`，并且会留下一堆
+**杀不掉**的僵尸进程（`Access is denied`）。把那个 DLL 临时改名后，同一个安装包立刻正常启动、
+端口正常监听——**这是决定性验证**，不是推测。
+
+**为什么坑了很久**：中间有一轮"看起来成功"（进程没退出、端口也不通），其实只是主进程还没结算；
+真正判据永远是**端口在监听 + 页面能取到 200**，不是 `HasExited`。
+
+**给用户的说法**：这不是应用 bug，退出 GamePP（或卸载游戏加加）即可。
+如果不想卸载，`artifacts/dist-app/win-unpacked/` 下是免安装版，同样受影响。
+
 ---
 
 ## 6. 文件清单

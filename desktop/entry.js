@@ -11,8 +11,14 @@
  * 实现阶段要做版本号，所以统一用目录方式启动。
  *
  * `--probe` 走 origin 持久性实验的探针，否则走正常启动。
+ *
+ * 注意：`probe.js` 是**开发期探路脚本**，不进安装包（见 build/desktopRuntimeFiles.js）。
+ * 所以打包形态下带 `--probe` 启动时，这里要求它存在才 require——不能无条件
+ * `require('./probe.js')`，那会让装好的软件在 asar 里找不到模块直接崩。
  */
-if (process.argv.includes('--probe')) {
+const wantsProbe = process.argv.includes('--probe');
+
+if (wantsProbe && require('node:fs').existsSync(require('node:path').join(__dirname, 'probe.js'))) {
   require('./probe.js');
 } else {
   require('./main.js');

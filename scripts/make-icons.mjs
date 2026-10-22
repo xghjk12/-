@@ -220,3 +220,47 @@ for (const size of [192, 512]) {
 }
 await writeFile(path.join(root, 'public', 'favicon.svg'), FAVICON);
 console.log('生成 public/favicon.svg');
+
+/* ==================== Windows .ico（打包用） ==================== */
+
+/**
+ * 多尺寸 ICO，交给 electron-builder 当 exe / 安装程序 / 快捷方式的图标。
+ *
+ * 为什么用 PNG 压缩而不是经典 BMP 格式：Vista 起的 ICO 允许每个条目直接内嵌
+ * 一张 PNG（`dwBytesInRes` 指向完整 PNG 数据），Windows 能正常读。
+ * 这样就不用写 BMP 的行反转 + AND 遮罩，少一半容易出错的手写代码。
+ * 尺寸覆盖 16（任务栏/资源管理器小图）到 256（大图标视图、安装程序）。
+ */
+function encodeIco(images) {
+  const header = Buffer.alloc(6);
+  header.writeUInt16LE(0, 0); // 保留
+  header.writeUInt16LE(1, 2); // 类型：1 = 图标
+  header.writeUInt16LE(images.length, 4);
+
+  const entries = [];
+  let offset = 6 + images.length * 16;
+  for (const { size, png } of images) {
+    const entry = Buffer.alloc(16);
+    // 256 在 ICO 里用 0 表示（字段只有 1 字节）
+    entry.writeUInt8(size >= 256 ? 0 : size, 0);
+    entry.writeUInt8(size >= 256 ? 0 : size, 1);
+    entry.writeUInt8(0, 2); // 调色板颜色数
+    entry.writeUInt8(0, 3); // 保留
+    entry.writeUInt16LE(1, 4); // 色彩平面数
+    entry.writeUInt16LE(32, 6); // 每像素位数
+    entry.writeUInt32LE(png.length, 8);
+    entry.writeUInt32LE(offset, 12);
+    entries.push(entry);
+    offset += png.length;
+  }
+
+  return Buffer.concat([header, ...entries, ...images.map((image) => image.png)]);
+}
+
+const icoPath = path.join(outDir, 'icon.ico');
+const icoSizes = [16, 24, 32, 48, 64, 128, 256];
+await writeFile(
+  icoPath,
+  encodeIco(icoSizes.map((size) => ({ size, png: drawIcon(size) }))),
+);
+console.log(`生成 ${path.relative(root, icoPath)}（${icoSizes.join('/')}px）`);
