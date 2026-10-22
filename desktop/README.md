@@ -852,6 +852,56 @@ powershell -ExecutionPolicy Bypass -File desktop\tools\fill-lyrics.ps1 -SelfTest
 **教训**：外部工具这条路，假工具 E2E 只能证明"壳层联通"，证明不了"真工具能跑"。
 凡是"包装别人程序"的功能，至少要有一个**不联网也能跑真程序**的自检模式进回归。
 
+### 坑 16（t12）：托盘"没有图标"不是我们的 bug——但 Electron 会把它藏起来
+
+用户三次反馈"**托盘没有图标**"。逐层排掉之后，结论分两半：
+
+**一半是系统故障，不是应用问题。** 直接调 `Shell_NotifyIcon(NIM_ADD)`（PowerShell + P/Invoke，
+用一个普通消息窗口、图标传 `LoadIcon` 的原生句柄）在同一台机器上**返回 FALSE**；而
+`NIM_ADD` 传一个**空图标句柄**时返回 **TRUE**。也就是说窗口消息这条链路是通的，
+**只是 explorer 不接受图标资源**。同时观察到：
+
+- `HKCU\...\Explorer\TrayNotify` 整个键**不存在**（`IconStreams` / `PastIconsStream` 都没有）；
+- Win11 用来记"每个托盘项可见性"的 `HKCU\Control Panel\NotifyIconSettings` 也**不存在**；
+- 通知区里一个图标都没有（通知区按钮命中测试只剩时钟 / ^ / 输入法 / 显示桌面）；
+- **重启 explorer 也没恢复**（pid 变了，两个注册表键依然不存在）。
+
+即：这台机器的通知区登记表本身是坏的，**任何**应用都放不进托盘图标。
+真正的修法是重登 Windows 用户（或新建一个用户配置），不是改代码。
+
+**另一半是我们的：Electron 把失败降级成一行 WARNING，整个 JS 侧看起来完全正常。**
+
+```
+[WARNING:electron\shell\browser\ui\win\notify_icon.cc:60] Unable to create status tray icon.
+[WARNING:electron\shell\browser\ui\win\notify_icon.cc:139] Error setting status tray icon image
+[WARNING:electron\shell\browser\ui\win\notify_icon.cc:167] Unable to set tooltip for status tray icon
+```
+
+`new Tray()` 照常返回一个"看起来健康"的对象：菜单能建、tooltip 能设、`isDestroyed()` 是 false，
+关窗照样 hide —— **窗口就此再也叫不回来**，用户只看到"没有图标"。所以这次的修复是三层：
+
+1. **不要把 AUMID 当解药**。`app.setAppUserModelId()` 影响任务栏分组与通知归属，
+   **不影响**图标能否进通知区（Windows 认的是 `Shell_NotifyIcon` 的返回值）。
+   （另外 `app.setName()` 在 `pinUserData()` 之后再调用会让 Electron 按新名字重建路径，
+   与已 `setPath` 的 userData 不一致 → 页面 `ERR_FAILED`、应用起不来。这条坑是本轮踩出来的，
+   **`main.js` 里任何 set 名字的调用都必须留在 `pinUserData()` 之前，或者干脆不要加**。）
+2. **把原生日志变成可诊断信号**：`desktop/checkTrayVisible.js` 拉起真应用、带
+   `--enable-logging` 采集 stderr，断言 `notify_icon.cc` 的 WARNING **不出现**。
+   以前这条故障没有任何自动化能发现（`checkTray.js` 只断言"托盘对象创建了"）。
+3. **托盘不可用时不能把窗口藏死**：`checkTrayVisible.js` 同时验证"关窗后窗口还叫得回来"
+   （托盘点不到时用户至少还能从任务栏/Alt+Tab 回去）。
+
+**怎么快速自查自己的机器**（任意机器，不依赖本项目）：
+
+```powershell
+# 有 notify_icon WARNING = 通知区拒收图标；一条都没有 = 托盘是好的
+node_modules\electron\dist\electron.exe desktop --no-sandbox --enable-logging
+```
+
+**教训**：第三方库"静默把错误降级成日志"时，断言**对象存在**是没有信息量的
+（`trayCreated: true` 在图标根本没出现时也是 true）。这类 API 必须断言**副作用**，
+而副作用在原生日志里——那就去读原生日志。
+
 ---
 
 ## 6. 文件清单

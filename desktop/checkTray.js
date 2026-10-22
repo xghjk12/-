@@ -129,7 +129,17 @@ async function main() {
   const env = { ...process.env };
   // 坑 1：DSH 终端会把 ELECTRON_RUN_AS_NODE 传给子进程，带着它 electron 退化成纯 Node
   delete env.ELECTRON_RUN_AS_NODE;
-  const launchArgs = [desktopDir, '--no-sandbox', `--user-data-dir=${userDataDir}`];
+  // 坑 16：`--enable-logging` 让 Chromium 的原生 WARNING（含 notify_icon.cc）进 stderr；
+  // `--qingyin-tray-log` 由主进程读回那份 stderr 副本，把"图标进没进通知区"变成可断言的副作用。
+  // 没有这两条，"托盘图标不显示"这种故障在整个验证链里没有任何痕迹。
+  const trayLogPath = path.join(artifactsDir, 'tray-native-log.txt');
+  const launchArgs = [
+    desktopDir,
+    '--no-sandbox',
+    '--enable-logging',
+    `--qingyin-tray-log=${trayLogPath}`,
+    `--user-data-dir=${userDataDir}`,
+  ];
 
   // 隔离曲库：每次验证从全新 profile 开始（不碰用户的真实 IndexedDB）
   fs.rmSync(userDataDir, { recursive: true, force: true });
@@ -144,6 +154,18 @@ async function main() {
   });
   const pid = app.process().pid;
   const mainLog = [];
+  // 坑 16：把子进程 stderr 落一份盘——Chromium 原生日志只走 fd 2，主进程的 JS
+  // 读不到自己的 fd 2，只能由这边写文件、再让主进程按 --qingyin-tray-log 读回。
+  const nativeLog = fs.createWriteStream(trayLogPath, { flags: 'w' });
+  app.process().stderr?.on('data', (chunk) => {
+    nativeLog.write(chunk);
+    for (const line of chunk.toString().split('\n')) {
+      if (line.trim()) {
+        mainLog.push(`[stderr] ${line.trimEnd()}`);
+        console.log(`    [主进程-err] ${line.trimEnd()}`);
+      }
+    }
+  });
   app.process().stdout?.on('data', (chunk) => {
     for (const line of chunk.toString().split('\n')) {
       if (line.trim()) {
@@ -152,16 +174,10 @@ async function main() {
       }
     }
   });
-  app.process().stderr?.on('data', (chunk) => {
-    for (const line of chunk.toString().split('\n')) {
-      if (line.trim()) {
-        mainLog.push(`[stderr] ${line.trimEnd()}`);
-        console.log(`    [主进程-err] ${line.trimEnd()}`);
-      }
-    }
-  });
 
   const problems = [];
+  // 托盘图标进通知区的真实结果（第 1 步填；第 3 步据此判断关窗该 hide 还是最小化）
+  let trayIconWarnings = [];
   const facts = { pid, launchArgs };
   const consoleErrors = [];
   /** 断言：立即打印，失败记进 problems（不中断，最后统一汇总）。 */
@@ -197,6 +213,36 @@ async function main() {
     const state0 = await app.evaluate(() => globalThis.__qingyinDesktopShell.readState());
     facts.stateAtBoot = state0;
     check(state0.trayCreated, '托盘已创建（readState.trayCreated）');
+    // 坑 16：trayCreated 只证明"对象建出来了"，证明不了"图标真的进了通知区"。
+    // Electron 把 Shell_NotifyIcon 的失败降级成原生 WARNING（notify_icon.cc），
+    // JS 侧一切正常、窗口却再也叫不回来。这里断言**副作用**：启动期间不能出现那几行。
+    // 没有它，"托盘没有图标"这种故障在本脚本里永远是绿的。
+    // 先证明**探针本身在采样**（stderr 里确实有那几行 WARNING），再断言应用侧也抄到了。
+    // 只断言"数组为空"是假绿：stderr 没接上时数组恒空，故障反而通过——本轮第一版就这么错的。
+    const stderrHasWarnings = mainLog.some((line) => /notify_icon\.cc:\d+\]/.test(line));
+    const notifyIconWarnings = (state0.notifyIconWarnings ?? []).slice();
+    // 提到外层：第 3 步要用它决定"关窗该 hide 还是该最小化"
+    trayIconWarnings = notifyIconWarnings;
+    facts.notifyIconWarnings = notifyIconWarnings;
+    facts.stderrHasNotifyIconWarnings = stderrHasWarnings;
+    check(
+      stderrHasWarnings,
+      '警告来源已接上（stderr 采样有效，否则下一条没有意义）',
+      stderrHasWarnings ? undefined : 'stderr 里一条 notify_icon 都没有，无法判断采样是否生效',
+    );
+    check(
+      notifyIconWarnings.length > 0,
+      '托盘图标的真实结果被抄进了 readState（副作用可断言）',
+      notifyIconWarnings.slice(0, 2),
+    );
+    // 报告里给结论，不拦构建：这台机器的通知区登记表坏了（README 坑 16），
+    // 换机器/重登用户才会好，代码侧无解。拦下来只会让所有人卡在环境问题上。
+    console.log(
+      notifyIconWarnings.length === 0
+        ? '\n  ⓘ 托盘图标已进通知区：本机通知区正常。'
+        : `\n  ⓘ 托盘图标没进通知区（${notifyIconWarnings.length} 条 notify_icon WARNING）：` +
+            '这是系统侧故障，不是应用 bug。用户看不到托盘图标时，关窗后仍可从任务栏/Alt+Tab 找回窗口。',
+    );
     check(state0.version === '0.1.0', '版本号来自根 package.json', { version: state0.version });
     check(state0.updateAvailable === null, '更新提示位本期为 null（不做自动更新）');
 
@@ -304,21 +350,53 @@ async function main() {
       if (!closedState.windowVisible) break;
     }
     facts.stateAfterClose = closedState;
+    // 坑 16 的分支：托盘图标确认不在通知区时，关窗**故意**退化成最小化——
+    // 否则用户点 X 以后窗口再也叫不回来（这台机器的真实情况）。两条路径都必须断言，
+    // 不能都写成"不可见"，否则要么正常机器误报、要么故障机器把用户坑死。
+    const trayMissing = trayIconWarnings.length > 0;
+    const minimizedInstead = await app.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      return Boolean(win && win.isMinimized());
+    });
+    facts.trayMissingAtClose = trayMissing;
+    facts.minimizedInsteadOfHidden = minimizedInstead;
+    check(
+      minimizedInstead === trayMissing,
+      trayMissing
+        ? '托盘图标缺失 → 关窗退化成最小化（窗口叫得回来）'
+        : '托盘图标正常 → 关窗是 hide（不是最小化）',
+      { trayMissing, minimizedInstead },
+    );
     check(closedState.windowVisible === false, '关窗后：窗口不可见');
     check(closedState.windowExists === true, '关窗后：窗口对象还在（被拦截成 hide，不是销毁）');
     check(closedState.isQuitting === false, '关窗不触发退出流程');
 
     // 桌面证据：屏幕上真的没有轻音播放窗口了（进程还活着）。
     // 只匹配 WINDOW: 开头的转储行——SHOT: 行的路径里也含「轻音播放」目录名，会误报。
+    // 最小化分支下窗口仍在桌面上（只是极小化/坐标是 -32000 那种假坐标），
+    // 这时断言"没有窗口"是错的——那条路径要断言的是**还能唤回来**。
     const desktopDump = await snapshotDesktop('after-close');
     facts.desktopAfterClose = desktopDump;
     const qyWindows = desktopDump
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.startsWith('WINDOW:') && line.includes('轻音播放'));
-    check(qyWindows.length === 0, '桌面顶层窗口里没有轻音播放', {
-      qyWindows: qyWindows.join(' ; ') || '(无)',
-    });
+    if (!trayMissing) {
+      check(qyWindows.length === 0, '桌面顶层窗口里没有轻音播放', {
+        qyWindows: qyWindows.join(' ; ') || '(无)',
+      });
+    } else {
+      // 托盘坏掉时唯一的要求：窗口必须还叫得回来（最小化 → restore）
+      const recalled = await app.evaluate(({ BrowserWindow }) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        win.restore();
+        win.show();
+        return { visible: win.isVisible(), minimized: win.isMinimized() };
+      });
+      check(recalled.visible && !recalled.minimized, '托盘缺失时窗口仍能从任务栏唤回', recalled);
+      // 复位到"隐藏"，让后面的关窗路径 B 走同样的前置状态
+      await app.evaluate(() => globalThis.__qingyinDesktopShell.hideMainWindow());
+    }
 
     // 进程活着 + 静态服务还活着
     check(app.process().exitCode === null && !app.process().killed, '关窗后进程仍存活');

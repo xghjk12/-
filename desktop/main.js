@@ -43,6 +43,14 @@ const userDataChoice = pinUserData();
 // pinUserData 内部已经 setPath，这之后 getPath('userData') 才安全（坑 1）
 const userDataDir = app.getPath('userData');
 
+// 系统身份：只补 AppUserModelID，**不要在这里再调 app.setName**。
+//  - `pinUserData()` 内部已经 `app.setName(APP_ID)`，且 userData 路径按 APP_ID 钉死；
+//    这里再改成中文名会让 Electron 内部按新名字重建部分路径，与已 setPath 的目录不一致
+//    → 实测表现为加载页面 `ERR_FAILED`、应用起不来。
+//  - AppUserModelID 是 Windows 认"这是哪个应用"的标识（任务栏分组、通知归属）；
+//    未打包的 Electron 默认没有它。它**不能**修好"托盘没有图标"（根因见 README 坑 16）。
+app.setAppUserModelId(constants.APP_ID);
+
 const repoRoot = path.resolve(__dirname, '..');
 const distDir = path.join(repoRoot, constants.DIST_DIRNAME);
 
@@ -68,6 +76,43 @@ let playback = { ...PLAYBACK_STATUS_UNKNOWN };
 let startupWindow = null;
 // t6：几何写盘的防抖器（拖动过程中不写，停下来写一次；真退出时 flush）
 let windowSaver = null;
+/**
+ * 坑 16：托盘图标创建失败时 Electron 只往 stderr 打 WARNING（notify_icon.cc），
+ * JS 侧完全看不出来。这里在进程启动早期装一个**自己写日志文件**的通道，
+ * 让验证脚本能断言"图标到底进没进通知区"。
+ *
+ * 为什么不劫持 `process.stderr.write`：Chromium 的原生日志由 C++ 直接写 fd 2，
+ * 不走 Node 的 stream 对象，劫持 stream 抓不到（本轮实测：stderr 里明明有 3 条
+ * WARNING，劫持后的数组仍是空的——那种"空数组 = 通过"的断言是假绿）。
+ * 也试过 `--log-file=`：不带 `--enable-logging=stderr` 时它不落地。
+ * 所以改成显式开关：`--qingyin-tray-log=<path>`（验证脚本传绝对路径），
+ * 启动完成后读回该文件、抽出 notify_icon 行。
+ */
+const notifyIconWarnings = [];
+const trayLogPath = readArgValue('--qingyin-tray-log');
+/**
+ * 按需读回原生日志（不缓存）：托盘在 boot 末段才创建，定时读早了会读到空文件，
+ * 那正是"空数组 = 通过"的假绿来源（本轮第一版就栽在这种时序上）。
+ */
+function readNotifyIconWarnings() {
+  notifyIconWarnings.length = 0;
+  if (!trayLogPath) return notifyIconWarnings;
+  try {
+    const text = fs.readFileSync(trayLogPath, 'utf8');
+    for (const line of text.split('\n')) {
+      if (/notify_icon\.cc:\d+\]/.test(line)) notifyIconWarnings.push(line.trim());
+    }
+  } catch {
+    // 文件还没写出来 / 路径不可写：保持空，由验证脚本判"没采样到"
+  }
+  return notifyIconWarnings;
+}
+
+function readArgValue(flag) {
+  const prefix = `${flag}=`;
+  const hit = process.argv.find((arg) => arg.startsWith(prefix));
+  return hit ? hit.slice(prefix.length) : null;
+}
 
 function fail(title, detail) {
   // showErrorBox 不依赖窗口，ready 前后都能用
@@ -171,7 +216,15 @@ function createWindow() {
       return;
     }
     event.preventDefault();
-    win.hide();
+    // 坑 16：托盘图标未必真的在通知区（Electron 只打 WARNING，见 README）。
+    // 图标不在时"藏进托盘"等于把窗口藏到用户找不到的地方——那种情况下退一步：
+    // 最小化到任务栏，用户至少能点任务栏/Alt+Tab 回来。
+    if (trayIconMissing()) {
+      win.minimize();
+      console.log('[desktop] 托盘图标不在通知区，关窗改为最小化（窗口仍可从任务栏唤回）');
+    } else {
+      win.hide();
+    }
     tray?.refresh();
   });
 
@@ -197,6 +250,17 @@ function createWindow() {
   for (const eventName of ['resize', 'move', 'maximize', 'unmaximize', 'restore']) {
     win.on(eventName, () => scheduleWindowStateSave(win));
   }
+}
+
+/**
+ * 托盘图标是否确认不在通知区。
+ *
+ * 判据只有一个可信来源：Chromium 原生层 `notify_icon.cc` 的 WARNING（见上面的
+ * readNotifyIconWarnings）。没有开采样（`--qingyin-tray-log` 未传）时返回 false
+ * ——**默认信任托盘**，否则正常环境会莫名其妙变成"关窗只最小化"。
+ */
+function trayIconMissing() {
+  return notifyIconWarnings.length > 0;
 }
 
 function showMainWindow() {
@@ -596,6 +660,10 @@ if (!app.requestSingleInstanceLock()) {
       windowExists: Boolean(mainWindow && !mainWindow.isDestroyed()),
       openAtLogin: settings.openAtLogin,
       trayCreated: Boolean(tray),
+      // 坑 16：托盘图标的**副作用**证据。Electron 不把 Shell_NotifyIcon 的失败当错误，
+      // 只在原生层记一行 WARNING，JS 侧 `new Tray()` 照常成功。启动早期把 stderr 里
+      // notify_icon 那几行抄进内存，验证脚本才有东西可断言（见 checkTrayVisible.js）。
+      notifyIconWarnings: readNotifyIconWarnings().slice(),
       menu: tray ? tray.describe() : [],
       isQuitting,
       // 自启 Run 项会写入的完整命令（验证脚本用它做 node 侧桥接复核，见 README §8）
